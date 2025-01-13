@@ -4,17 +4,14 @@
 #include "fdctl.h"
 
 #include "run/topos/topos.h"
-#include "run/run.h"
 
 #include "../../ballet/toml/fd_toml.h"
-#include "../../disco/topo/fd_topob.h"
 #include "../../disco/topo/fd_pod_format.h"
 #include "../../flamenco/runtime/fd_blockstore.h"
 #include "../../flamenco/runtime/fd_txncache.h"
 #include "../../funk/fd_funk.h"
 #include "../../util/net/fd_eth.h"
 #include "../../util/net/fd_ip4.h"
-#include "../../util/tile/fd_tile_private.h"
 
 #include <fcntl.h>
 #include <pwd.h>
@@ -113,7 +110,8 @@ listen_address( const char * interface ) {
   int fd = socket( AF_INET, SOCK_DGRAM, 0 );
   struct ifreq ifr = {0};
   ifr.ifr_addr.sa_family = AF_INET;
-  strncpy( ifr.ifr_name, interface, IF_NAMESIZE );
+  strncpy( ifr.ifr_name, interface, IFNAMSIZ );
+  ifr.ifr_name[ IFNAMSIZ-1 ] = '\0';
   if( FD_UNLIKELY( ioctl( fd, SIOCGIFADDR, &ifr ) ) )
     FD_LOG_ERR(( "could not get IP address of interface `%s` (%i-%s)", interface, errno, fd_io_strerror( errno ) ));
   if( FD_UNLIKELY( close(fd) ) )
@@ -127,7 +125,7 @@ mac_address( const char * interface,
   int fd = socket( AF_INET, SOCK_DGRAM, IPPROTO_IP );
   struct ifreq ifr;
   ifr.ifr_addr.sa_family = AF_INET;
-  strncpy( ifr.ifr_name, interface, IF_NAMESIZE );
+  strncpy( ifr.ifr_name, interface, IFNAMSIZ );
   if( FD_UNLIKELY( ioctl( fd, SIOCGIFHWADDR, &ifr ) ) )
     FD_LOG_ERR(( "could not get MAC address of interface `%s`: (%i-%s)", interface, errno, fd_io_strerror( errno ) ));
   if( FD_UNLIKELY( close(fd) ) )
@@ -215,8 +213,6 @@ fdctl_obj_align( fd_topo_t const *     topo,
     return fd_dcache_align();
   } else if( FD_UNLIKELY( !strcmp( obj->name, "cnc" ) ) ) {
     return fd_cnc_align();
-  } else if( FD_UNLIKELY( !strcmp( obj->name, "reasm" ) ) ) {
-    return fd_tpu_reasm_align();
   } else if( FD_UNLIKELY( !strcmp( obj->name, "fseq" ) ) ) {
     return fd_fseq_align();
   } else if( FD_UNLIKELY( !strcmp( obj->name, "metrics" ) ) ) {
@@ -258,18 +254,16 @@ fdctl_obj_footprint( fd_topo_t const *     topo,
     return fd_dcache_footprint( fd_dcache_req_data_sz( VAL("mtu"), VAL("depth"), VAL("burst"), 1), 0UL );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "cnc" ) ) ) {
     return fd_cnc_footprint( 0UL );
-  } else if( FD_UNLIKELY( !strcmp( obj->name, "reasm" ) ) ) {
-    return fd_tpu_reasm_footprint( VAL("depth"), VAL("burst") );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "fseq" ) ) ) {
     return fd_fseq_footprint();
   } else if( FD_UNLIKELY( !strcmp( obj->name, "metrics" ) ) ) {
     return FD_METRICS_FOOTPRINT( VAL("in_cnt"), VAL("cons_cnt") );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "blockstore" ) ) ) {
-    return fd_blockstore_footprint();
+    return fd_blockstore_footprint( VAL("shred_max"), VAL("block_max"), VAL("idx_max"), VAL("txn_max") ) + VAL("alloc_max");
   } else if( FD_UNLIKELY( !strcmp( obj->name, "funk" ) ) ) {
     return fd_funk_footprint();
   } else if( FD_UNLIKELY( !strcmp( obj->name, "txncache" ) ) ) {
-    return fd_txncache_footprint( VAL("max_rooted_slots"), VAL("max_live_slots"), VAL("max_txn_per_slot") );
+    return fd_txncache_footprint( VAL("max_rooted_slots"), VAL("max_live_slots"), VAL("max_txn_per_slot"), FD_TXNCACHE_DEFAULT_MAX_CONSTIPATED_SLOTS );
   } else {
     FD_LOG_ERR(( "unknown object `%s`", obj->name ));
     return 0UL;
@@ -368,20 +362,12 @@ validate_ports( config_t * result ) {
 #define FD_CONFIG_CLUSTER_MAINNET_BETA (5UL)
 
 FD_FN_PURE static ulong
-determine_cluster( ulong  entrypoints_cnt,
-                   char   entrypoints[16][256],
-                   char * expected_genesis_hash ) {
+determine_cluster( char * expected_genesis_hash ) {
   char const * DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
   char const * TESTNET_GENESIS_HASH = "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY";
   char const * MAINNET_BETA_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
   char const * PYTHTEST_GENESIS_HASH = "EkCkB7RWVrgkcpariRpd3pjf7GwiCMZaMHKUpB5Na1Ve";
   char const * PYTHNET_GENESIS_HASH = "GLKkBUr6r72nBtGrtBPJLRqtsh8wXZanX4xfnqKnWwKq";
-
-  char const * DEVNET_ENTRYPOINT_URI = "devnet.solana.com";
-  char const * TESTNET_ENTRYPOINT_URI = "testnet.solana.com";
-  char const * MAINNET_BETA_ENTRYPOINT_URI = "mainnet-beta.solana.com";
-  char const * PYTHTEST_ENTRYPOINT_URI = "pythtest.pyth.network";
-  char const * PYTHNET_ENTRYPOINT_URI = "pythnet.pyth.network";
 
   ulong cluster = FD_CONFIG_CLUSTER_UNKNOWN;
   if( FD_LIKELY( expected_genesis_hash ) ) {
@@ -390,14 +376,6 @@ determine_cluster( ulong  entrypoints_cnt,
     else if( FD_UNLIKELY( !strcmp( expected_genesis_hash, MAINNET_BETA_GENESIS_HASH ) ) ) cluster = FD_CONFIG_CLUSTER_MAINNET_BETA;
     else if( FD_UNLIKELY( !strcmp( expected_genesis_hash, PYTHTEST_GENESIS_HASH ) ) )     cluster = FD_CONFIG_CLUSTER_PYTHTEST;
     else if( FD_UNLIKELY( !strcmp( expected_genesis_hash, PYTHNET_GENESIS_HASH ) ) )      cluster = FD_CONFIG_CLUSTER_PYTHNET;
-  }
-
-  for( ulong i=0; i<entrypoints_cnt; i++ ) {
-    if( FD_UNLIKELY( strstr( entrypoints[ i ], DEVNET_ENTRYPOINT_URI ) ) )            cluster = fd_ulong_max( cluster, FD_CONFIG_CLUSTER_DEVNET );
-    else if( FD_UNLIKELY( strstr( entrypoints[ i ], TESTNET_ENTRYPOINT_URI ) ) )      cluster = fd_ulong_max( cluster, FD_CONFIG_CLUSTER_TESTNET );
-    else if( FD_UNLIKELY( strstr( entrypoints[ i ], MAINNET_BETA_ENTRYPOINT_URI ) ) ) cluster = fd_ulong_max( cluster, FD_CONFIG_CLUSTER_MAINNET_BETA );
-    else if( FD_UNLIKELY( strstr( entrypoints[ i ], PYTHTEST_ENTRYPOINT_URI ) ) )     cluster = fd_ulong_max( cluster, FD_CONFIG_CLUSTER_PYTHTEST );
-    else if( FD_UNLIKELY( strstr( entrypoints[ i ], PYTHNET_ENTRYPOINT_URI ) ) )      cluster = fd_ulong_max( cluster, FD_CONFIG_CLUSTER_PYTHNET );
   }
 
   return cluster;
@@ -463,13 +441,13 @@ fdctl_cfg_from_env( int *      pargc,
   static uchar pod_mem2[ 1UL<<20 ];
   uchar * pod1 = fd_pod_join( fd_pod_new( pod_mem1, sizeof(pod_mem1) ) );
   uchar * pod2 = fd_pod_join( fd_pod_new( pod_mem2, sizeof(pod_mem2) ) );
- 
+
   uchar scratch[ 4096 ];
   long toml_err = fd_toml_parse( fdctl_default_config, fdctl_default_config_sz, pod1, scratch, sizeof(scratch) );
   if( FD_UNLIKELY( toml_err!=FD_TOML_SUCCESS ) ) FD_LOG_ERR(( "Invalid config (%s)", "default.toml" ));
   toml_err = fd_toml_parse( fdctl_default_firedancer_config, fdctl_default_firedancer_config_sz, pod2, scratch, sizeof(scratch) );
   if( FD_UNLIKELY( toml_err!=FD_TOML_SUCCESS ) ) FD_LOG_ERR(( "Invalid config (%s)", "default-firedancer.toml" ));
- 
+
   if( FD_UNLIKELY( !fdctl_pod_to_cfg( config, pod1 ) ) ) FD_LOG_ERR(( "Invalid config (%s)", "default.toml" ));
   if( FD_UNLIKELY( !fdctl_pod_to_cfg( config, pod2 ) ) ) FD_LOG_ERR(( "Invalid config (%s)", "default-firedancer.toml" ));
   fd_pod_delete( fd_pod_leave( pod1 ) );
@@ -526,9 +504,7 @@ fdctl_cfg_from_env( int *      pargc,
       FD_LOG_ERR(( "could not get name of interface with index %d", ifindex ));
   }
 
-  ulong cluster = determine_cluster( config->gossip.entrypoints_cnt,
-                                     config->gossip.entrypoints,
-                                     config->consensus.expected_genesis_hash );
+  ulong cluster = determine_cluster( config->consensus.expected_genesis_hash );
   config->is_live_cluster = cluster != FD_CONFIG_CLUSTER_UNKNOWN;
 
   if( FD_UNLIKELY( config->development.netns.enabled ) ) {

@@ -2,7 +2,6 @@
 #define FD_SCRATCH_USE_HANDHOLDING 1
 #include "../../fdctl/configure/configure.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -282,7 +281,7 @@ check( config_t * const config ) {
   PARTIALLY_CONFIGURED( "`%s` already exists", genesis_path );
 }
 
-configure_stage_t genesis = {
+configure_stage_t fd_cfg_stage_genesis = {
   .name            = NAME,
   .init            = init,
   .fini            = fini,

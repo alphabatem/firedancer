@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "fd_sandbox.h"
+#include "fd_sandbox_private.h"
 
 #include "../cstr/fd_cstr.h"
 #include "../log/fd_log.h"
@@ -26,7 +26,7 @@
 #error "Target operating system is unsupported by seccomp."
 #endif
 
-#if !defined(__x86_64__)
+#if !defined(__x86_64__) && !defined(__aarch64__)
 #error "Target architecture is unsupported by seccomp."
 #else
 

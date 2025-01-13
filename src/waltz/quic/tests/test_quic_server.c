@@ -1,14 +1,5 @@
 #include "../fd_quic.h"
 #include "fd_quic_test_helpers.h"
-#include "../../tls/test_tls_helper.h"
-#include "../../../ballet/x509/fd_x509_mock.h"
-
-int server_complete = 0;
-
-/* server connection received in callback */
-fd_quic_conn_t * server_conn = NULL;
-
-extern FILE * fd_quic_test_pcap;
 
 int
 main( int argc, char ** argv ) {
@@ -40,7 +31,7 @@ main( int argc, char ** argv ) {
 
   fd_aio_t const * aio_rx = fd_quic_get_aio_net_rx( quic );
   if( fd_quic_test_pcap ) {
-    FD_TEST( 1UL==fd_aio_pcapng_start( fd_quic_test_pcap ) );
+    FD_TEST( 1UL==fd_aio_pcapng_start_l3( fd_quic_test_pcap ) );
     static fd_aio_pcapng_t pcap_rx[1];
     FD_TEST( fd_aio_pcapng_join( pcap_rx, aio_rx, fd_quic_test_pcap ) );
     aio_rx = fd_aio_pcapng_get_aio( pcap_rx );
@@ -76,7 +67,6 @@ main( int argc, char ** argv ) {
   quic_config->retry = 0;
   FD_TEST( fd_quic_config_from_env( &argc, &argv, quic_config ) );
 
-  memcpy( quic_config->link.src_mac_addr, udpsock->self_mac, 6UL );
   quic_config->net.ip_addr         = udpsock->listen_ip;
   quic_config->net.listen_udp_port = udpsock->listen_port;
 
@@ -88,12 +78,12 @@ main( int argc, char ** argv ) {
   }
   fd_quic_set_aio_net_tx( quic, aio_tx );
 
-  FD_LOG_NOTICE(( "Initializing QUIC" ));
   FD_TEST( fd_quic_init( quic ) );
 
   /* TODO support pcap if requested */
 
   /* do general processing */
+  FD_LOG_NOTICE(( "Running" ));
   while(1) {
     fd_quic_service( quic );
     fd_quic_udpsock_service( udpsock );

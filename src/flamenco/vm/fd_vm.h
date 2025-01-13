@@ -15,7 +15,7 @@ typedef struct fd_vm fd_vm_t;
 /* A fd_vm_shadow_t holds stack frame information not accessible from
    within a program. */
 
-struct fd_vm_shadow { ulong r6; ulong r7; ulong r8; ulong r9; ulong pc; };
+struct fd_vm_shadow { ulong r6; ulong r7; ulong r8; ulong r9; ulong r10; ulong pc; };
 typedef struct fd_vm_shadow fd_vm_shadow_t;
 
 /* fd_vm_input_region_t holds information about fragmented memory regions 
@@ -34,9 +34,12 @@ typedef struct fd_vm_input_region fd_vm_input_region_t;
    region location. */
 
 struct __attribute((aligned(8UL))) fd_vm_acc_region_meta {
-   uint  region_idx;
-   uchar has_data_region;
-   uchar has_resizing_region;        
+   uint                                region_idx;
+   uchar                               has_data_region;
+   uchar                               has_resizing_region;   
+   /* offset of the accounts metadata region, relative to the start of the input region.
+      importantly, this excludes any duplicate account markers at the beginning of the "full" metadata region. */   
+   ulong                               metadata_region_offset;
 };
 typedef struct fd_vm_acc_region_meta fd_vm_acc_region_meta_t;
 
@@ -204,6 +207,8 @@ struct __attribute__((aligned(FD_VM_HOST_REGION_ALIGN))) fd_vm {
   /* Agave reports different error codes (for developers to understand the failure cause) if direct mapping is 
      enabled AND we halt on a segfault caused by a store on an invalid vaddr. */
   ulong segv_store_vaddr;
+
+  ulong sbpf_version;     /* SBPF version, SIMD-0161 */
 };
 
 /* FIXME: MOVE ABOVE INTO PRIVATE WHEN CONSTRUCTORS READY */
@@ -218,7 +223,7 @@ FD_PROTOTYPES_BEGIN
    integer power of 2.  FOOTPRINT is a multiple of align. 
    These are provided to facilitate compile time declarations. */
 #define FD_VM_ALIGN     FD_VM_HOST_REGION_ALIGN
-#define FD_VM_FOOTPRINT (527296UL)
+#define FD_VM_FOOTPRINT (527808UL)
 
 /* fd_vm_{align,footprint} give the needed alignment and footprint
    of a memory region suitable to hold an fd_vm_t.
@@ -276,6 +281,7 @@ fd_vm_init(
    ulong text_sz,
    ulong entry_pc,
    ulong * calldests,
+   ulong sbpf_version,
    fd_sbpf_syscalls_t * syscalls,
    fd_vm_trace_t * trace,
    fd_sha256_t * sha,

@@ -42,6 +42,10 @@ deps-bundle.tar.zst
 # VSCode
 .vscode
 
+# JetBrains
+.fleet
+.idea
+
 # Packet Captures
 *.pcap
 *.pcapng
@@ -66,3 +70,7 @@ mainnet.sh
 localnet.sh
 sim.sh
 backtest.sh
+
+# Python
+venv
+*.pyc

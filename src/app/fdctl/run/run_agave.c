@@ -127,6 +127,7 @@ agave_boot( config_t * config ) {
   if( config->rpc.port ) ADDH( "--rpc-port", config->rpc.port );
   if( config->rpc.full_api ) ADD1( "--full-rpc-api" );
   if( config->rpc.private ) ADD1( "--private-rpc" );
+  if( strcmp( config->rpc.bind_address, "" ) ) ADD( "--rpc-bind-address", config->rpc.bind_address );
   if( config->rpc.transaction_history ) ADD1( "--enable-rpc-transaction-history" );
   if( config->rpc.extended_tx_metadata_storage ) ADD1( "--enable-extended-tx-metadata-storage" );
   if( config->rpc.only_known ) ADD1( "--only-known-rpc" );
@@ -143,6 +144,19 @@ agave_boot( config_t * config ) {
   ADDU( "--maximum-snapshots-to-retain", config->snapshots.maximum_full_snapshots_to_retain );
   ADDU( "--maximum-incremental-snapshots-to-retain", config->snapshots.maximum_incremental_snapshots_to_retain );
   ADDU( "--minimal-snapshot-download-speed", config->snapshots.minimum_snapshot_download_speed );
+
+  if( config->layout.agave_unified_scheduler_handler_threads ) {
+    if( FD_UNLIKELY( config->layout.agave_unified_scheduler_handler_threads>config->topo.agave_affinity_cnt ) ) {
+      FD_LOG_ERR(( "Trying to spawn %u handler threads but the agave subprocess has %lu cores. "
+                   "Either increase the number of cores in [layout.agave_affinity] or reduce "
+                   "the number of threads in [layout.agave_unified_scheduler_handler_threads].",
+                   config->layout.agave_unified_scheduler_handler_threads, config->topo.agave_affinity_cnt ));
+    }
+    ADDU( "--unified-scheduler-handler-threads", config->layout.agave_unified_scheduler_handler_threads );
+  } else {
+    ulong num_threads = fd_ulong_max( config->topo.agave_affinity_cnt-4UL, fd_ulong_min( config->topo.agave_affinity_cnt, 4UL ) );
+    ADDU( "--unified-scheduler-handler-threads", (uint)num_threads );
+  }
 
   argv[ idx ] = NULL;
 

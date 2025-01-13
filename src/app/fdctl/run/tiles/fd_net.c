@@ -39,11 +39,11 @@
 
 #include "../../../../disco/metrics/fd_metrics.h"
 
-#include "../../../../waltz/quic/fd_quic.h"
 #include "../../../../waltz/xdp/fd_xdp.h"
 #include "../../../../waltz/xdp/fd_xdp1.h"
 #include "../../../../waltz/xdp/fd_xsk_aio_private.h"
 #include "../../../../waltz/xdp/fd_xsk_private.h"
+#include "../../../../util/log/fd_dtrace.h"
 #include "../../../../util/net/fd_ip4.h"
 #include "../../../../waltz/ip/fd_ip.h"
 
@@ -128,7 +128,7 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
     l = FD_LAYOUT_APPEND( l, fd_xsk_align(),      fd_xsk_footprint( FD_NET_MTU, tile->net.xdp_rx_queue_size, tile->net.xdp_rx_queue_size, tile->net.xdp_tx_queue_size, tile->net.xdp_tx_queue_size ) );
     l = FD_LAYOUT_APPEND( l, fd_xsk_aio_align(),  fd_xsk_aio_footprint( tile->net.xdp_tx_queue_size, tile->net.xdp_aio_depth ) );
   }
-  l = FD_LAYOUT_APPEND( l, fd_ip_align(),         fd_ip_footprint( 0U, 0U ) );
+  l = FD_LAYOUT_APPEND( l, fd_ip_align(),         fd_ip_footprint( 0UL, 0UL ) );
   return FD_LAYOUT_FINI( l, scratch_align() );
 }
 
@@ -175,12 +175,17 @@ net_rx_aio_send( void *                    _ctx,
     uchar const * udp = iphdr + iplen;
 
     /* Ignore if UDP header is too short */
-    if( FD_UNLIKELY( udp+8U > packet_end ) ) continue;
+    if( FD_UNLIKELY( udp+8U > packet_end ) ) {
+      FD_DTRACE_PROBE( net_tile_err_rx_undersz );
+      continue;
+    }
 
     /* Extract IP dest addr and UDP src/dest port */
     uint ip_srcaddr    =                  *(uint   *)( iphdr+12UL );
     ushort udp_srcport = fd_ushort_bswap( *(ushort *)( udp+0UL    ) );
     ushort udp_dstport = fd_ushort_bswap( *(ushort *)( udp+2UL    ) );
+
+    FD_DTRACE_PROBE_4( net_tile_pkt_rx, ip_srcaddr, udp_srcport, udp_dstport, batch[i].buf_sz );
 
     ushort proto;
     fd_net_out_ctx_t * out;
@@ -251,12 +256,12 @@ metrics_write( fd_net_ctx_t * ctx ) {
     tx_sz  += ctx->xsk_aio[ 1 ]->metrics.tx_sz;
   }
 
-  FD_MCNT_SET( NET_TILE, RECEIVED_PACKETS, rx_cnt );
-  FD_MCNT_SET( NET_TILE, RECEIVED_BYTES,   rx_sz  );
-  FD_MCNT_SET( NET_TILE, SENT_PACKETS,     tx_cnt );
-  FD_MCNT_SET( NET_TILE, SENT_BYTES,       tx_sz  );
+  FD_MCNT_SET( NET, RECEIVED_PACKETS, rx_cnt );
+  FD_MCNT_SET( NET, RECEIVED_BYTES,   rx_sz  );
+  FD_MCNT_SET( NET, SENT_PACKETS,     tx_cnt );
+  FD_MCNT_SET( NET, SENT_BYTES,       tx_sz  );
 
-  FD_MCNT_SET( NET_TILE, TX_DROPPED, ctx->metrics.tx_dropped_cnt );
+  FD_MCNT_SET( NET, TX_DROPPED, ctx->metrics.tx_dropped_cnt );
 }
 
 static void
@@ -295,8 +300,8 @@ poll_xdp_statistics( fd_net_ctx_t * ctx ) {
     FD_LOG_ERR(( "getsockopt(SOL_XDP, XDP_STATISTICS) failed: %s", strerror( errno ) ));
 
   if( FD_LIKELY( optlen==sizeof(struct xdp_statistics_v1) ) ) {
-    FD_MCNT_SET( NET_TILE, XDP_RX_DROPPED_OTHER, stats.rx_dropped );
-    FD_MCNT_SET( NET_TILE, XDP_RX_DROPPED_RING_FULL, stats.rx_ring_full );
+    FD_MCNT_SET( NET, XDP_RX_DROPPED_OTHER, stats.rx_dropped );
+    FD_MCNT_SET( NET, XDP_RX_DROPPED_RING_FULL, stats.rx_ring_full );
 
     FD_TEST( !stats.rx_invalid_descs );
     FD_TEST( !stats.tx_invalid_descs );
@@ -305,7 +310,7 @@ poll_xdp_statistics( fd_net_ctx_t * ctx ) {
     // FD_TEST( !stats.rx_fill_ring_empty_descs );
     // FD_TEST( !stats.tx_ring_empty_descs );
   } else if( FD_LIKELY( optlen==sizeof(struct xdp_statistics_v0) ) ) {
-    FD_MCNT_SET( NET_TILE, XDP_RX_DROPPED_OTHER, stats.rx_dropped );
+    FD_MCNT_SET( NET, XDP_RX_DROPPED_OTHER, stats.rx_dropped );
 
     FD_TEST( !stats.rx_invalid_descs );
     FD_TEST( !stats.tx_invalid_descs );
@@ -404,19 +409,20 @@ after_frag( fd_net_ctx_t *      ctx,
             ulong               in_idx,
             ulong               seq,
             ulong               sig,
-            ulong               chunk,
             ulong               sz,
             ulong               tsorig,
             fd_stem_context_t * stem ) {
   (void)in_idx;
   (void)seq;
   (void)sig;
-  (void)chunk;
   (void)tsorig;
   (void)stem;
 
   fd_aio_pkt_info_t aio_buf = { .buf = ctx->frame, .buf_sz = (ushort)sz };
   if( FD_UNLIKELY( route_loopback( ctx->src_ip_addr, sig ) ) ) {
+    /* Set Ethernet src and dst address to 00:00:00:00:00:00 */
+    memset( ctx->frame, 0, 12UL );
+
     ulong sent_cnt;
     int aio_err = ctx->lo_tx->send_func( ctx->xsk_aio[ 1 ], &aio_buf, 1, &sent_cnt, 1 );
     ctx->metrics.tx_dropped_cnt += aio_err!=FD_AIO_SUCCESS;

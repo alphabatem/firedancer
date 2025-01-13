@@ -8,6 +8,9 @@
 #include "../../../../disco/bank/fd_bank_abi.h"
 #include "../../../../disco/metrics/generated/fd_metrics_bank.h"
 
+#define FD_BANK_TRANSACTION_LANDED    1
+#define FD_BANK_TRANSACTION_EXECUTED  2
+
 typedef struct {
   ulong kind_id;
 
@@ -18,6 +21,9 @@ typedef struct {
   uchar * txn_sidecar_mem;
 
   void const * _bank;
+  ulong _microblock_idx;
+
+  ulong * busy_fseq;
 
   fd_wksp_t * pack_in_mem;
   ulong       pack_in_chunk0;
@@ -32,9 +38,11 @@ typedef struct {
     ulong slot_acquire[ 3 ];
 
     ulong txn_load_address_lookup_tables[ 6 ];
-    ulong txn_load[ 39 ];
-    ulong txn_executing[ 39 ];
-    ulong txn_executed[ 39 ];
+    ulong transaction_result[ 39 ];
+    ulong processing_failed;
+    ulong fee_only;
+    ulong exec_failed;
+    ulong success;
   } metrics;
 } fd_bank_ctx_t;
 
@@ -57,13 +65,15 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
 
 static inline void
 metrics_write( fd_bank_ctx_t * ctx ) {
-  FD_MCNT_ENUM_COPY( BANK_TILE, SLOT_ACQUIRE,  ctx->metrics.slot_acquire );
+  FD_MCNT_ENUM_COPY( BANK, SLOT_ACQUIRE,  ctx->metrics.slot_acquire );
 
-  FD_MCNT_ENUM_COPY( BANK_TILE, TRANSACTION_LOAD_ADDRESS_TABLES, ctx->metrics.txn_load_address_lookup_tables );
-  FD_MCNT_ENUM_COPY( BANK_TILE, TRANSACTION_LOAD,  ctx->metrics.txn_load );
-  FD_MCNT_ENUM_COPY( BANK_TILE, TRANSACTION_EXECUTING,  ctx->metrics.txn_executing );
-  FD_MCNT_ENUM_COPY( BANK_TILE, TRANSACTION_EXECUTED,  ctx->metrics.txn_executed );
+  FD_MCNT_ENUM_COPY( BANK, TRANSACTION_LOAD_ADDRESS_TABLES, ctx->metrics.txn_load_address_lookup_tables );
+  FD_MCNT_ENUM_COPY( BANK, TRANSACTION_RESULT,  ctx->metrics.transaction_result );
 
+  FD_MCNT_SET( BANK, PROCESSING_FAILED,            ctx->metrics.processing_failed );
+  FD_MCNT_SET( BANK, FEE_ONLY_TRANSACTIONS,        ctx->metrics.fee_only          );
+  FD_MCNT_SET( BANK, EXECUTED_FAILED_TRANSACTIONS, ctx->metrics.exec_failed       );
+  FD_MCNT_SET( BANK, SUCCESSFUL_TRANSACTIONS,      ctx->metrics.success           );
 }
 
 static int
@@ -84,7 +94,7 @@ before_frag( fd_bank_ctx_t * ctx,
 }
 
 extern void * fd_ext_bank_pre_balance_info( void const * bank, void * txns, ulong txn_cnt );
-extern void * fd_ext_bank_load_and_execute_txns( void const * bank, void * txns, ulong txn_cnt, int * out_load_results, int * out_executing_results, int * out_executed_results, uint * out_consumed_cus );
+extern void * fd_ext_bank_load_and_execute_txns( void const * bank, void * txns, ulong txn_cnt, int * out_processing_results, int * out_transaction_err, uint * out_consumed_cus );
 extern void   fd_ext_bank_commit_txns( void const * bank, void const * txns, ulong txn_cnt , void * load_and_execute_output, void * pre_balance_info );
 extern void   fd_ext_bank_release_thunks( void * load_and_execute_output );
 extern void   fd_ext_bank_release_pre_balance_info( void * pre_balance_info );
@@ -110,6 +120,7 @@ during_frag( fd_bank_ctx_t * ctx,
   fd_memcpy( dst, src, sz-sizeof(fd_microblock_bank_trailer_t) );
   fd_microblock_bank_trailer_t * trailer = (fd_microblock_bank_trailer_t *)( src+sz-sizeof(fd_microblock_bank_trailer_t) );
   ctx->_bank = trailer->bank;
+  ctx->_microblock_idx = trailer->microblock_idx;
 }
 
 static void
@@ -138,12 +149,10 @@ after_frag( fd_bank_ctx_t *     ctx,
             ulong               in_idx,
             ulong               seq,
             ulong               sig,
-            ulong               chunk,
             ulong               sz,
             ulong               tsorig,
             fd_stem_context_t * stem ) {
   (void)in_idx;
-  (void)chunk;
   (void)tsorig;
 
   uchar * dst = (uchar *)fd_chunk_to_laddr( ctx->out_mem, ctx->out_chunk );
@@ -166,7 +175,7 @@ after_frag( fd_bank_ctx_t *     ctx,
 
     int precompile_result = fd_ext_bank_verify_precompiles( ctx->_bank, abi_txn );
     if( FD_UNLIKELY( precompile_result ) ) {
-      FD_MCNT_INC( BANK_TILE, PRECOMPILE_VERIFY_FAILURE, 1 );
+      FD_MCNT_INC( BANK, PRECOMPILE_VERIFY_FAILURE, 1 );
       continue;
     }
 
@@ -179,19 +188,17 @@ after_frag( fd_bank_ctx_t *     ctx,
 
   /* Just because a transaction was executed doesn't mean it succeeded,
      but all executed transactions get committed. */
-  int  load_results     [ MAX_TXN_PER_MICROBLOCK ] = { 0  };
-  int  executing_results[ MAX_TXN_PER_MICROBLOCK ] = { 0  };
-  int  executed_results [ MAX_TXN_PER_MICROBLOCK ] = { 0  };
-  uint consumed_cus     [ MAX_TXN_PER_MICROBLOCK ] = { 0U };
+  int  processing_results[ MAX_TXN_PER_MICROBLOCK ] = { 0  };
+  int  transaction_err   [ MAX_TXN_PER_MICROBLOCK ] = { 0  };
+  uint consumed_cus      [ MAX_TXN_PER_MICROBLOCK ] = { 0U };
 
   void * pre_balance_info = fd_ext_bank_pre_balance_info( ctx->_bank, ctx->txn_abi_mem, sanitized_txn_cnt );
 
   void * load_and_execute_output = fd_ext_bank_load_and_execute_txns( ctx->_bank,
                                                                       ctx->txn_abi_mem,
                                                                       sanitized_txn_cnt,
-                                                                      load_results,
-                                                                      executing_results,
-                                                                      executed_results,
+                                                                      processing_results,
+                                                                      transaction_err,
                                                                       consumed_cus     );
 
   ulong sanitized_idx = 0UL;
@@ -207,14 +214,28 @@ after_frag( fd_bank_ctx_t *     ctx,
     if( FD_UNLIKELY( !(txn->flags & FD_TXN_P_FLAGS_SANITIZE_SUCCESS) ) ) continue;
 
     sanitized_idx++;
-    ctx->metrics.txn_load[ load_results[ sanitized_idx-1 ] ]++;
-    if( FD_UNLIKELY( load_results[ sanitized_idx-1 ] ) ) continue;
 
-    ctx->metrics.txn_executing[ executing_results[ sanitized_idx-1 ] ]++;
-    if( FD_UNLIKELY( executing_results[ sanitized_idx-1 ] ) ) continue;
+    /* Stash the result in the flags value so that pack can inspect it.
+     */
+    txn->flags = (txn->flags & 0x00FFFFFFU) | ((uint)transaction_err[ sanitized_idx-1UL ]<<24);
 
-    ctx->metrics.txn_executed[ executed_results[ sanitized_idx-1 ] ]++;
+    ctx->metrics.transaction_result[ transaction_err   [ sanitized_idx-1UL ] ]++;
+
+    ctx->metrics.processing_failed += (ulong)(processing_results[ sanitized_idx-1UL ]==0                         );
+    ctx->metrics.fee_only          += (ulong)(processing_results[ sanitized_idx-1UL ]==FD_BANK_TRANSACTION_LANDED);
+
+    if( FD_UNLIKELY( !(processing_results[ sanitized_idx-1UL ] & FD_BANK_TRANSACTION_LANDED) ) ) continue;
+
+    /* TXN_P_FLAGS_EXECUTE_SUCCESS means that it should be included in
+       the block.  It's a bit of a misnomer now that there are fee-only
+       transactions. */
     txn->flags                      |= FD_TXN_P_FLAGS_EXECUTE_SUCCESS;
+
+    if( FD_UNLIKELY( !(processing_results[ sanitized_idx-1UL ] & FD_BANK_TRANSACTION_EXECUTED) ) ) continue;
+
+    if( transaction_err[ sanitized_idx-1UL ] ) ctx->metrics.exec_failed++;
+    else                                       ctx->metrics.success++;
+
     uint executed_cus                = consumed_cus[ sanitized_idx-1UL ];
     txn->bank_cu.actual_consumed_cus = non_execution_cus + executed_cus;
     if( FD_UNLIKELY( executed_cus>requested_cus ) ) {
@@ -227,7 +248,7 @@ after_frag( fd_bank_ctx_t *     ctx,
          we'll just permit the risk of slightly overpacking blocks by
          ignoring these transactions when it comes to rebating. */
       FD_LOG_INFO(( "Transaction executed %u CUs but only requested %u CUs", executed_cus, requested_cus ));
-      FD_MCNT_INC( BANK_TILE, COST_MODEL_UNDERCOUNT, 1UL );
+      FD_MCNT_INC( BANK, COST_MODEL_UNDERCOUNT, 1UL );
       txn->bank_cu.rebated_cus = 0U;
       continue;
     }
@@ -244,13 +265,17 @@ after_frag( fd_bank_ctx_t *     ctx,
   pre_balance_info        = NULL;
   load_and_execute_output = NULL;
 
+  /* Indicate to pack tile we are done processing the transactions so
+     it can pack new microblocks using these accounts.  This has to be
+     done after commiting the transactions to poh otherwise there is a
+     race. */
+  fd_fseq_update( ctx->busy_fseq, seq );
+
   /* Now produce the merkle hash of the transactions for inclusion
      (mixin) to the PoH hash.  This is done on the bank tile because
      it shards / scales horizontally here, while PoH does not. */
   fd_microblock_trailer_t * trailer = (fd_microblock_trailer_t *)( dst + txn_cnt*sizeof(fd_txn_p_t) );
   hash_transactions( ctx->bmtree, (fd_txn_p_t*)dst, txn_cnt, trailer->hash );
-  trailer->bank_idx      = ctx->kind_id;
-  trailer->bank_busy_seq = seq;
 
   /* MAX_MICROBLOCK_SZ - (MAX_TXN_PER_MICROBLOCK*sizeof(fd_txn_p_t)) == 64
      so there's always 64 extra bytes at the end to stash the hash. */
@@ -263,12 +288,14 @@ after_frag( fd_bank_ctx_t *     ctx,
     PoH should eventually flush the pipeline before ending the slot. */
   metrics_write( ctx );
 
+  ulong bank_sig = fd_disco_bank_sig( slot, ctx->_microblock_idx );
+
   /* We always need to publish, even if there are no successfully executed
      transactions so the PoH tile can keep an accurate count of microblocks
      it has seen. */
   ulong tspub = (ulong)fd_frag_meta_ts_comp( fd_tickcount() );
   ulong new_sz = txn_cnt*sizeof(fd_txn_p_t) + sizeof(fd_microblock_trailer_t);
-  fd_stem_publish( stem, 0UL, sig, ctx->out_chunk, new_sz, 0UL, 0UL, tspub );
+  fd_stem_publish( stem, 0UL, bank_sig, ctx->out_chunk, new_sz, 0UL, 0UL, tspub );
   ctx->out_chunk = fd_dcache_compact_next( ctx->out_chunk, new_sz, ctx->out_chunk0, ctx->out_wmark );
 }
 
@@ -292,6 +319,11 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->kind_id = tile->kind_id;
   ctx->blake3 = NONNULL( fd_blake3_join( fd_blake3_new( blake3 ) ) );
   ctx->bmtree = NONNULL( bmtree );
+
+  ulong busy_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "bank_busy.%lu", tile->kind_id );
+  FD_TEST( busy_obj_id!=ULONG_MAX );
+  ctx->busy_fseq = fd_fseq_join( fd_topo_obj_laddr( topo, busy_obj_id ) );
+  if( FD_UNLIKELY( !ctx->busy_fseq ) ) FD_LOG_ERR(( "banking tile %lu has no busy flag", tile->kind_id ));
 
   memset( &ctx->metrics, 0, sizeof( ctx->metrics ) );
 

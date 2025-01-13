@@ -1,7 +1,11 @@
 #include "../../../../disco/tiles.h"
 
 #include <sys/socket.h> /* SOCK_CLOEXEC, SOCK_NONBLOCK needed for seccomp filter */
+#if defined(__aarch64__)
+#include "generated/metric.arm64_seccomp.h"
+#else
 #include "generated/metric_seccomp.h"
+#endif
 
 #include "../../version.h"
 
@@ -14,7 +18,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <string.h>
-#include <poll.h>
 #include <stdio.h>
 
 #define FD_HTTP_SERVER_METRICS_MAX_CONNS          128
@@ -71,7 +74,7 @@ metrics_http_request( fd_http_server_request_t const * request ) {
   }
 
   if( FD_LIKELY( !strcmp( request->path, "/metrics" ) ) ) {
-    fd_prometheus_format( ctx->topo, ctx->metrics_server );
+    fd_prometheus_render_all( ctx->topo, ctx->metrics_server );
 
     fd_http_server_response_t response = {
       .status       = 200,

@@ -1,4 +1,5 @@
 #define _DEFAULT_SOURCE
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -8,7 +9,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "../../flamenco/rpcserver/fd_rpc_service.h"
+#include "../../disco/rpcserver/fd_rpc_service.h"
 #include "../../funk/fd_funk_filemap.h"
 
 #define SHAM_LINK_CONTEXT fd_rpc_ctx_t
@@ -35,6 +36,14 @@ init_args( int * argc, char *** argv, fd_rpcserver_args_t * args ) {
     FD_LOG_ERR(( "failed to join a funky" ));
   }
 
+  char const * blockstore_file = fd_env_strip_cmdline_cstr( argc, argv, "--blockstore-file", NULL, NULL );
+  if( FD_UNLIKELY( !blockstore_file ))
+    FD_LOG_ERR(( "--blockstore-file argument is required" ));
+  args->blockstore_fd = open( blockstore_file, O_RDONLY );
+  if( args->blockstore_fd == -1 ) {
+    FD_LOG_ERR(( "failed to open blockstore file" ));
+  }
+
   const char * wksp_name = fd_env_strip_cmdline_cstr ( argc, argv, "--wksp-name-blockstore", NULL, "fd1_bstore.wksp" );
   FD_LOG_NOTICE(( "attaching to workspace \"%s\"", wksp_name ));
   fd_wksp_t * wksp = fd_wksp_attach( wksp_name );
@@ -59,10 +68,10 @@ init_args( int * argc, char *** argv, fd_rpcserver_args_t * args ) {
 
   args->port = (ushort)fd_env_strip_cmdline_ulong( argc, argv, "--port", NULL, 8899 );
 
-  args->params.max_connection_cnt =    fd_env_strip_cmdline_ulong( argc, argv, "--max-connection-cnt",    NULL, 10 );
+  args->params.max_connection_cnt =    fd_env_strip_cmdline_ulong( argc, argv, "--max-connection-cnt",    NULL, 30 );
   args->params.max_ws_connection_cnt = fd_env_strip_cmdline_ulong( argc, argv, "--max-ws-connection-cnt", NULL, 10 );
   args->params.max_request_len =       fd_env_strip_cmdline_ulong( argc, argv, "--max-request-len",       NULL, 1<<16 );
-  args->params.max_ws_recv_frame_len = fd_env_strip_cmdline_ulong( argc, argv, "--max-ws-recv-frame-len", NULL, 2048 );
+  args->params.max_ws_recv_frame_len = fd_env_strip_cmdline_ulong( argc, argv, "--max-ws-recv-frame-len", NULL, 1<<16 );
   args->params.max_ws_send_frame_cnt = fd_env_strip_cmdline_ulong( argc, argv, "--max-ws-send-frame-cnt", NULL, 100 );
   args->params.outgoing_buffer_sz    = fd_env_strip_cmdline_ulong( argc, argv, "--max-send-buf",          NULL, 100U<<20U );
 
@@ -111,16 +120,14 @@ init_args_offline( int * argc, char *** argv, fd_rpcserver_args_t * args ) {
   } else {
     char const * restore = fd_env_strip_cmdline_cstr ( argc, argv, "--restore-blockstore", NULL, NULL );
     if( restore == NULL ) FD_LOG_ERR(( "must use --wksp-name-blockstore or --restore-blockstore in offline mode" ));
-    uint seed;
-    ulong part_max;
-    ulong data_max;
-    int err = fd_wksp_restore_preview( restore, &seed, &part_max, &data_max );
+    fd_wksp_preview_t preview[1];
+    int err = fd_wksp_preview( restore, preview );
     if( err ) FD_LOG_ERR(( "unable to restore %s: error %d", restore, err ));
-    ulong page_cnt = (data_max + FD_SHMEM_GIGANTIC_PAGE_SZ-1U)/FD_SHMEM_GIGANTIC_PAGE_SZ;
+    ulong page_cnt = (preview->data_max + FD_SHMEM_GIGANTIC_PAGE_SZ-1U)/FD_SHMEM_GIGANTIC_PAGE_SZ;
     wksp = fd_wksp_new_anonymous( FD_SHMEM_GIGANTIC_PAGE_SZ, page_cnt, 0, "wksp-blockstore", 0UL );
     if( !wksp ) FD_LOG_ERR(( "unable to restore %s: failed to create wksp", restore ));
     FD_LOG_NOTICE(( "restoring blockstore wksp %s", restore ));
-    fd_wksp_restore( wksp, restore, seed );
+    fd_wksp_restore( wksp, restore, preview->seed );
   }
   fd_wksp_tag_query_info_t info;
   ulong tag = 1;
@@ -190,7 +197,8 @@ int main( int argc, char ** argv ) {
   signal( SIGPIPE, SIG_IGN );
 
   fd_rpc_ctx_t * ctx = NULL;
-  fd_rpc_start_service( &args, &ctx );
+  fd_rpc_create_ctx( &args, &ctx );
+  fd_rpc_start_service( &args, ctx );
 
   if( args.offline ) {
     while( !stopflag ) {
@@ -216,4 +224,24 @@ int main( int argc, char ** argv ) {
 
   fd_halt();
   return 0;
+}
+
+static void
+replay_sham_link_during_frag(fd_rpc_ctx_t * ctx, fd_replay_notif_msg_t * state, void const * msg, int sz) {
+  fd_rpc_replay_during_frag( ctx, state, msg, sz );
+}
+
+static void
+replay_sham_link_after_frag(fd_rpc_ctx_t * ctx, fd_replay_notif_msg_t * msg) {
+  fd_rpc_replay_after_frag( ctx, msg );
+}
+
+static void
+stake_sham_link_during_frag(fd_rpc_ctx_t * ctx, fd_stake_ci_t * state, void const * msg, int sz) {
+  fd_rpc_stake_during_frag( ctx, state, msg, sz );
+}
+
+static void
+stake_sham_link_after_frag(fd_rpc_ctx_t * ctx, fd_stake_ci_t * state) {
+  fd_rpc_stake_after_frag( ctx, state );
 }

@@ -64,12 +64,10 @@ typedef struct fd_quic_pkt_meta_var fd_quic_pkt_meta_var_t;
    used when acks arrive to determine what is being acked specifically */
 struct fd_quic_pkt_meta {
   /* stores metadata about what was sent in the identified packet */
-  ulong                  pkt_number;  /* the packet number */
-  uchar                  enc_level;   /* every packet is sent at a specific
-                                       enc_level */
-  uchar                  pn_space;    /* packet number space (must be consistent
-                                       with enc_level)  */
-  uchar                  var_sz;      /* number of populated entries in var */
+  ulong pkt_number;  /* packet number (in pn_space) */
+  uchar enc_level;   /* encryption level of packet */
+  uchar pn_space;    /* packet number space (derived from enc_level) */
+  uchar var_sz;      /* number of populated entries in var */
 
   /* does/should the referenced packet contain:
        FD_QUIC_PKT_META_FLAGS_HS_DATA             handshake data
@@ -78,8 +76,6 @@ struct fd_quic_pkt_meta {
        FD_QUIC_PKT_META_FLAGS_MAX_DATA            max_data frame
        FD_QUIC_PKT_META_FLAGS_MAX_STREAMS_UNIDIR  max_streams frame (unidir)
        FD_QUIC_PKT_META_FLAGS_CLOSE               close frame
-       FD_QUIC_PKT_META_FLAGS_KEY_UPDATE          indicates key update was in effect
-       FD_QUIC_PKT_META_FLAGS_KEY_PHASE           set only if key_phase was set in the short-header
        FD_QUIC_PKT_META_FLAGS_PING                set to send a PING frame
 
      some of these flags are mutually exclusive */
@@ -90,11 +86,7 @@ struct fd_quic_pkt_meta {
 # define          FD_QUIC_PKT_META_FLAGS_MAX_DATA           (1u<<3u)
 # define          FD_QUIC_PKT_META_FLAGS_MAX_STREAMS_UNIDIR (1u<<5u)
 # define          FD_QUIC_PKT_META_FLAGS_CLOSE              (1u<<8u)
-# define          FD_QUIC_PKT_META_FLAGS_KEY_UPDATE         (1u<<9u)
-# define          FD_QUIC_PKT_META_FLAGS_KEY_PHASE          (1u<<10u)
-  fd_quic_range_t        range;       /* range of bytes referred to by this meta */
-                                      /* stream data or crypto data */
-                                      /* we currently do not put both in the same packet */
+  fd_quic_range_t        range;       /* CRYPTO data range; FIXME use pkt_meta var instead */
   ulong                  stream_id;   /* if this contains stream data,
                                          the stream id, else zero */
 

@@ -6,11 +6,16 @@
 #include "context/fd_exec_instr_ctx.h"
 #include "../../ballet/block/fd_microblock.h"
 #include "../../ballet/pack/fd_microblock.h"
+#include "../../ballet/txn/fd_txn.h"
 #include "../../ballet/poh/fd_poh.h"
 #include "../types/fd_types_yaml.h"
 #include "../log_collector/fd_log_collector.h"
 #include "tests/generated/invoke.pb.h"
 #include "tests/generated/txn.pb.h"
+#include "../features/fd_features.h"
+#include "fd_runtime.h"
+
+#define FD_FEE_PAYER_TXN_IDX (0UL)
 
 /* FD_EXEC_CU_UPDATE consumes CUs from the current instr ctx
    and fails in case of error. */
@@ -22,15 +27,11 @@
 
 FD_PROTOTYPES_BEGIN
 
-/* Create an InstrContext protobuf struct from a given 
-   transaction context and instr info. 
-
-   NOTE: Calling this function requires the caller to have a scratch 
-   frame ready and pushed (see dump_instr_to_protobuf) */
-void
-fd_create_instr_context_protobuf_from_instructions( fd_exec_test_instr_context_t       * instr_context,
-                                                    fd_exec_txn_ctx_t            const * txn_ctx,
-                                                    fd_instr_info_t              const * instr );
+/* https://github.com/anza-xyz/agave/blob/v2.0.9/runtime/src/bank.rs#L3239-L3251 */
+static inline ulong
+get_transaction_account_lock_limit( fd_exec_slot_ctx_t const * slot_ctx ) {
+  return fd_ulong_if( FD_FEATURE_ACTIVE( slot_ctx, increase_tx_account_lock_limit ), MAX_TX_ACCOUNT_LOCKS, 64UL );
+}
 
 /* fd_exec_instr_fn_t processes an instruction.  Returns an error code
    in FD_EXECUTOR_INSTR_{ERR_{...},SUCCESS}. */
@@ -75,15 +76,6 @@ fd_execute_txn_prepare_start( fd_exec_slot_ctx_t *  slot_ctx,
                                fd_txn_t const * txn_descriptor,
                                fd_rawtxn_b_t const * txn_raw );
 
-int
-fd_execute_txn_prepare_phase3( fd_exec_slot_ctx_t *  slot_ctx,
-                               fd_exec_txn_ctx_t * txn_ctx,
-                               fd_txn_p_t * txn );
-
-int
-fd_execute_txn_finalize( fd_exec_txn_ctx_t * txn_ctx,
-                         int exec_txn_err );
-
 /*
   Execute the given transaction.
 
@@ -111,7 +103,7 @@ fd_executor_is_system_nonce_account( fd_borrowed_account_t * account );
  */
 
 int
-fd_executor_txn_check( fd_exec_slot_ctx_t const * slot_ctx, 
+fd_executor_txn_check( fd_exec_slot_ctx_t const * slot_ctx,
                        fd_exec_txn_ctx_t *        txn );
 
 void
@@ -148,9 +140,6 @@ fd_exec_consume_cus( fd_exec_txn_ctx_t * txn_ctx,
   txn_ctx->compute_meter = new_cus;
   return FD_EXECUTOR_INSTR_SUCCESS;
 }
-
-void
-dump_txn_to_protobuf( fd_exec_txn_ctx_t *txn_ctx, fd_spad_t * spad );
 
 /* We expose these only for the fuzzing harness.
    Normally you shouldn't be invoking these manually. */

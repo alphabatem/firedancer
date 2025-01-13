@@ -6,7 +6,7 @@ static inline void set_memory_region( uchar * mem, ulong sz ) { for( ulong i=0UL
 static void
 test_vm_syscall_toggle_direct_mapping( fd_vm_t * vm_ctx, int enable ) {
   ulong slot = enable ? 0UL : FD_FEATURE_DISABLED;
-  char const * one_offs[] = { "EenyoWx9UMXYKpR8mW5Jmfmy2fRjzUtM7NduYMY8bx33" };
+  char const * one_offs[] = { "GJVDwRkUPNdk9QaK4VsU4g1N41QNxhy1hevjf8kz45Mq" };
   fd_features_enable_one_offs( (fd_features_t*)&vm_ctx->instr_ctx->epoch_ctx->features, one_offs, 1U, slot );
   vm_ctx->direct_mapping = enable;
 }
@@ -228,6 +228,7 @@ main( int     argc,
       /* text_sz          */ 0UL,
       /* entry_pc         */ 0UL,
       /* calldests        */ NULL,
+      /* sbpf_version     */ TEST_VM_DEFAULT_SBPF_VERSION,
       /* syscalls         */ NULL,
       /* trace            */ NULL,
       /* sha              */ sha,
@@ -265,7 +266,7 @@ main( int     argc,
                               0UL,
                               0UL,
                               100UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   test_vm_syscall_toggle_direct_mapping( vm, 1 ); /* enable direct mapping */
 
@@ -292,7 +293,7 @@ main( int     argc,
                               0UL,
                               0UL,
                               100UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   test_vm_syscall_sol_memset( "test_vm_syscall_sol_memset: memset across multiple input mem regions",
                               vm,
@@ -317,7 +318,7 @@ main( int     argc,
                               (ulong)&input + 50UL,
                               1UL,
                               800UL,
-                              1UL, FD_VM_ERR_INVAL );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
   input_mem_regions[2].is_writable=1;
 
 
@@ -350,7 +351,7 @@ main( int     argc,
                               (ulong)&vm->heap[0],
                               (ulong)&vm->rodata[0],
                               100UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   // test we cannot copy more than the available size from the read-only region
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy from read only region to heap region",
@@ -360,7 +361,7 @@ main( int     argc,
                               (ulong)&vm->rodata[0],
                               (ulong)&vm->heap[0],
                               rodata_sz + 1UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   // test we cannot copy overlapping regions in heap where src is before dst
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy overlapping regions in heap - src before dst",
@@ -370,7 +371,7 @@ main( int     argc,
                               (ulong)&vm->heap[0],
                               (ulong)&vm->heap[10],
                               100UL,
-                              0UL, FD_VM_ERR_MEM_OVERLAP );
+                              0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
   // test we cannot copy overlapping regions in heap where src is after dst
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy overlapping regions in heap - src after dst",
@@ -380,7 +381,7 @@ main( int     argc,
                               (ulong)&vm->heap[10],
                               (ulong)&vm->heap[0],
                               100UL,
-                              0UL, FD_VM_ERR_MEM_OVERLAP );
+                              0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
   test_vm_syscall_toggle_direct_mapping( vm, 1 ); /* enable direct mapping */
 
@@ -411,7 +412,7 @@ main( int     argc,
                               (ulong)&vm->heap[0],
                               (ulong)&vm->rodata[0],
                               100UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   // test we cannot copy more than the available size from the read-only region
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy from read only region to heap region",
@@ -421,7 +422,7 @@ main( int     argc,
                               (ulong)&vm->rodata[0],
                               (ulong)&vm->heap[0],
                               rodata_sz + 1UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   // test we cannot copy overlapping regions in heap where src is before dst
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy overlapping regions in heap - src before dst",
@@ -431,7 +432,7 @@ main( int     argc,
                               (ulong)&vm->heap[0],
                               (ulong)&vm->heap[10],
                               100UL,
-                              0UL, FD_VM_ERR_MEM_OVERLAP );
+                              0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
   // test we cannot copy overlapping regions in heap where src is after dst
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy overlapping regions in heap - src after dst",
@@ -441,7 +442,7 @@ main( int     argc,
                               (ulong)&vm->heap[10],
                               (ulong)&vm->heap[0],
                               100UL,
-                              0UL, FD_VM_ERR_MEM_OVERLAP );
+                              0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy in input (single region)",
                                 vm,
@@ -459,7 +460,7 @@ main( int     argc,
                                 vm->input_mem_regions[0].haddr + 80UL,
                                 vm->input_mem_regions[0].haddr + 120UL,
                                 50UL,
-                                0UL, FD_VM_ERR_MEM_OVERLAP );
+                                0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
   test_vm_syscall_sol_memcpy( "test_vm_syscall_sol_memcpy: memcpy in input multiple regions",
                                 vm,
@@ -477,7 +478,7 @@ main( int     argc,
                                 vm->input_mem_regions[0].haddr + 50UL,
                                 vm->input_mem_regions[0].haddr + 450UL,
                                 500UL,
-                                0UL, FD_VM_ERR_MEM_OVERLAP );
+                                0UL, FD_VM_SYSCALL_ERR_COPY_OVERLAPPING );
 
 
   test_vm_syscall_toggle_direct_mapping( vm, 0 ); /* disable direct mapping */
@@ -520,7 +521,7 @@ main( int     argc,
                                (ulong)&vm->heap[0],
                                (ulong)&vm->rodata[0],
                                100UL,
-                               0UL, FD_VM_ERR_SIGSEGV );
+                               0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   test_vm_syscall_toggle_direct_mapping( vm, 1 ); /* enable direct mapping */
 
@@ -562,7 +563,7 @@ main( int     argc,
                                (ulong)&vm->heap[0],
                                (ulong)&vm->rodata[0],
                                100UL,
-                               0UL, FD_VM_ERR_SIGSEGV );
+                               0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
 
   test_vm_syscall_sol_memmove( "test_vm_syscall_sol_memmove: memmove in input (single region)",
@@ -635,7 +636,7 @@ main( int     argc,
                               (ulong)&vm->rodata[100],
                               (ulong)&vm->rodata[200],
                               100UL,
-                              0UL, FD_VM_ERR_SIGSEGV );
+                              0UL, FD_VM_SYSCALL_ERR_SEGFAULT );
 
   memset( (void*)input_mem_regions[0].haddr, 0xFF, 400UL );
   test_vm_syscall_sol_memcmp( "test_vm_syscall_sol_memcmp: memcmp input region equal",
@@ -751,7 +752,7 @@ main( int     argc,
   fd_vm_delete    ( fd_vm_leave    ( vm  ) );
   fd_sha256_delete( fd_sha256_leave( sha ) );
   fd_rng_delete   ( fd_rng_leave   ( rng ) );
-  test_vm_exec_instr_ctx_delete( instr_ctx );
+  test_vm_exec_instr_ctx_delete( instr_ctx, fd_libc_alloc_virtual() );
 
   FD_LOG_NOTICE(( "pass" ));
   fd_halt();

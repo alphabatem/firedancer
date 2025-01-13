@@ -1,4 +1,5 @@
 #include "fd_tls_proto.h"
+#include "../../ballet/x509/fd_x509_mock.h"
 
 FD_STATIC_ASSERT( sizeof( fd_tls_ext_cert_type_list_t )==1UL, layout );
 FD_STATIC_ASSERT( sizeof( fd_tls_ext_cert_type_t      )==1UL, layout );
@@ -134,10 +135,10 @@ test_tls_client_respond( fd_tls_t *            client,
   while( (rec = test_record_recv( &test_server_out )) ) {
     long res = fd_tls_client_handshake( client, hs, rec->buf, rec->cur, rec->level );
     if( res<0L ) {
+      fd_halt();
       FD_LOG_ERR(( "fd_tls_client_handshake failed (alert %ld-%s; reason %u-%s)",
                    res,             fd_tls_alert_cstr( (uint)-res ),
                    hs->base.reason, fd_tls_reason_cstr( hs->base.reason ) ));
-      fd_halt();
     }
   }
 }
@@ -152,7 +153,6 @@ test_tls_server_respond( fd_tls_t *            server,
       FD_LOG_ERR(( "fd_tls_server_handshake failed (alert %ld-%s; reason %u-%s)",
                    res,             fd_tls_alert_cstr( (uint)-res ),
                    hs->base.reason, fd_tls_reason_cstr( hs->base.reason ) ));
-      fd_halt();
     }
   }
 }
@@ -167,9 +167,9 @@ static void
 prepare_tls_pair( fd_rng_t * rng,
                   fd_tls_t * client,
                   fd_tls_t * server ) {
-  static fd_tls_test_sign_ctx_t client_sign_ctx, server_sign_ctx;
-  client_sign_ctx = fd_tls_test_sign_ctx( rng );
-  server_sign_ctx = fd_tls_test_sign_ctx( rng );
+  static fd_tls_test_sign_ctx_t client_sign_ctx[1], server_sign_ctx[1];
+  fd_tls_test_sign_ctx( client_sign_ctx, rng );
+  fd_tls_test_sign_ctx( server_sign_ctx, rng );
 
   *client = (fd_tls_t) {
     .rand       = fd_tls_test_rand( rng ),
@@ -188,9 +188,14 @@ prepare_tls_pair( fd_rng_t * rng,
   /* Generate keys */
 
   for( ulong b=0; b<32UL; b++ ) server->kex_private_key [b] = fd_rng_uchar( rng );
-  fd_memcpy( server->cert_public_key, server_sign_ctx.public_key, 32UL );
+  fd_memcpy( server->cert_public_key, server_sign_ctx->public_key, 32UL );
   for( ulong b=0; b<32UL; b++ ) client->kex_private_key [b] = fd_rng_uchar( rng );
-  fd_memcpy( client->cert_public_key, client_sign_ctx.public_key, 32UL );
+  fd_memcpy( client->cert_public_key, client_sign_ctx->public_key, 32UL );
+
+  fd_x509_mock_cert( server->cert_x509, server->cert_public_key );
+  server->cert_x509_sz = FD_X509_MOCK_CERT_SZ;
+  fd_x509_mock_cert( client->cert_x509, client->cert_public_key );
+  client->cert_x509_sz = FD_X509_MOCK_CERT_SZ;
 
   fd_x25519_public( server->kex_public_key, server->kex_private_key );
   fd_x25519_public( client->kex_public_key, client->kex_private_key );
@@ -273,7 +278,7 @@ test_tls_client_wrong_ciphersuite( fd_rng_t * rng ) {
 
   long alert = fd_tls_server_handshake( server, srv_hs, client_hello, sizeof(client_hello), FD_TLS_LEVEL_INITIAL );
   FD_TEST( alert == -FD_TLS_ALERT_HANDSHAKE_FAILURE );
-  FD_TEST( srv_hs->base.reason == FD_TLS_REASON_CH_CRYPTO_NEG );
+  FD_TEST( srv_hs->base.reason == FD_TLS_REASON_CH_NEG_CIPHER );
 
   fd_tls_estate_srv_delete( srv_hs );
   fd_tls_estate_cli_delete( cli_hs );

@@ -1,6 +1,5 @@
 #include "fd_snapshot_loader.h"
-#include "fd_snapshot.h"
-#include "fd_snapshot_restore.h"
+#include "fd_snapshot_base.h"
 #include "fd_snapshot_http.h"
 
 #include <errno.h>
@@ -11,6 +10,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+
+#define FD_SNAPSHOT_LOADER_MAGIC (0xa78a73a69d33e6b1UL)
 
 struct fd_snapshot_loader {
   ulong magic;
@@ -46,11 +47,9 @@ struct fd_snapshot_loader {
   /* Hash and slot numbers from filename */
 
   fd_snapshot_name_t name;
-};
+}; 
 
 typedef struct fd_snapshot_loader fd_snapshot_loader_t;
-
-#define FD_SNAPSHOT_LOADER_MAGIC (0xa78a73a69d33e6b1UL)
 
 ulong
 fd_snapshot_loader_align( void ) {
@@ -114,7 +113,6 @@ fd_snapshot_loader_delete( fd_snapshot_loader_t * loader ) {
   fd_io_istream_file_delete( loader->vfile );
   fd_snapshot_http_delete  ( loader->http  );
   fd_tar_reader_delete     ( loader->tar   );
-  fd_zstd_dstream_delete   ( loader->zstd  );
 
   if( loader->snapshot_fd>=0 ) {
     if( FD_UNLIKELY( 0!=close( loader->snapshot_fd ) ) )
@@ -133,7 +131,8 @@ fd_snapshot_loader_t *
 fd_snapshot_loader_init( fd_snapshot_loader_t *    d,
                          fd_snapshot_restore_t *   restore,
                          fd_snapshot_src_t const * src,
-                         ulong                     base_slot ) {
+                         ulong                     base_slot,
+                         int                       validate_slot ) {
 
   d->restore = restore;
 
@@ -145,7 +144,12 @@ fd_snapshot_loader_init( fd_snapshot_loader_t *    d,
       return NULL;
     }
 
-    if( FD_UNLIKELY( !fd_snapshot_name_from_cstr( &d->name, src->file.path, base_slot ) ) ) {
+    fd_snapshot_name_t * name = fd_snapshot_name_from_cstr( &d->name, src->file.path );
+    if( FD_UNLIKELY( !name ) ) {
+      return NULL;
+    }
+
+    if( FD_UNLIKELY( validate_slot && fd_snapshot_name_slot_validate( name, base_slot ) ) ) {
       return NULL;
     }
 
@@ -199,9 +203,15 @@ fd_snapshot_loader_advance( fd_snapshot_loader_t * dumper ) {
   fd_tar_io_reader_t * vtar = dumper->vtar;
 
   int untar_err = fd_tar_io_reader_advance( vtar );
-  if( untar_err==0 )     { /* ok */ }
-  else if( untar_err<0 ) { /* EOF */ return -1; }
-  else {
+  if( untar_err==0 ) { 
+    /* Ok */ 
+  } else if( untar_err==MANIFEST_DONE ) {
+    /* Finished reading the manifest for the first time. */
+    return MANIFEST_DONE;
+  } else if( untar_err<0 ) { 
+    /* EOF */
+    return -1; 
+  } else {
     FD_LOG_WARNING(( "Failed to load snapshot (%d-%s)", untar_err, fd_io_strerror( untar_err ) ));
     return untar_err;
   }
@@ -300,10 +310,6 @@ fd_snapshot_src_parse( fd_snapshot_src_t * src,
     FD_LOG_WARNING(( "Failed to resolve socket address for %s", hostname ));
     freeaddrinfo( result );
     return NULL;
-  } else if( 0==strncmp( cstr, "archive:", sizeof("archive:")-1 ) ) {
-    src->type = FD_SNAPSHOT_SRC_ARCHIVE;
-    src->file.path = cstr + (sizeof("archive:")-1);
-    return src;
   } else {
     src->type = FD_SNAPSHOT_SRC_FILE;
     src->file.path = cstr;

@@ -33,12 +33,20 @@ extern const fd_pubkey_t fd_solana_bpf_loader_upgradeable_program_id;
 extern const fd_pubkey_t fd_solana_bpf_loader_v4_program_id;
 extern const fd_pubkey_t fd_solana_ed25519_sig_verify_program_id;
 extern const fd_pubkey_t fd_solana_keccak_secp_256k_program_id;
+extern const fd_pubkey_t fd_solana_secp256r1_program_id;
 extern const fd_pubkey_t fd_solana_compute_budget_program_id;
 extern const fd_pubkey_t fd_solana_address_lookup_table_program_id;
 extern const fd_pubkey_t fd_solana_spl_native_mint_id;
 extern const fd_pubkey_t fd_solana_spl_token_id;
 extern const fd_pubkey_t fd_solana_zk_token_proof_program_id;
 extern const fd_pubkey_t fd_solana_zk_elgamal_proof_program_id;
+
+/* Buffer accounts for BPF migrations
+   https://github.com/anza-xyz/agave/blob/v2.1.6/runtime/src/bank/builtins/mod.rs#L151-L165 */
+extern const fd_pubkey_t fd_solana_address_lookup_table_program_buffer_address;
+extern const fd_pubkey_t fd_solana_config_program_buffer_address;
+extern const fd_pubkey_t fd_solana_feature_program_buffer_address;
+extern const fd_pubkey_t fd_solana_stake_program_buffer_address;
 
 /* fd_pubkey_is_{pending, active}_reserved_key checks to see if the pubkey is
    a reserved account. They return 1 if the pubkey is in the list, and 
@@ -54,7 +62,7 @@ extern const fd_pubkey_t fd_solana_zk_elgamal_proof_program_id;
    
    Instead of maintaining a map of sysvars and builtins, Agave recommends checking the sysvar owner account, or checking
    the reserved keys below. 
-   https://github.com/anza-xyz/agave/blob/66c126b41ec2b55b3f747a4ac4e3ee6b439164a5/sdk/program/src/sysvar/mod.rs#L127-L130 */
+   https://github.com/anza-xyz/agave/blob/v2.1.1/sdk/src/reserved_account_keys.rs */
 int 
 fd_pubkey_is_active_reserved_key( fd_pubkey_t const * acct );
 

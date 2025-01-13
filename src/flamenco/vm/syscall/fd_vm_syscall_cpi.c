@@ -5,129 +5,6 @@
 #include "../../runtime/fd_executor.h"
 #include "../../runtime/fd_account_old.h" /* FIXME: remove this and update to use new APIs */
 #include <stdio.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <errno.h>
-#include "../../nanopb/pb_encode.h"
-#include "../../runtime/tests/generated/vm.pb.h"
-#include "../../runtime/tests/fd_exec_instr_test.h"
-
-#define STRINGIFY(x) TOSTRING(x)
-#define TOSTRING(x) #x
-
-/* Captures the state of the VM (including the instruction context).
-   Meant to be invoked at the start of the VM_SYSCALL_CPI_ENTRYPOINT like so:
-
-  ```
-   dump_vm_cpi_state(vm, STRINGIFY(FD_EXPAND_THEN_CONCAT2(sol_invoke_signed_, VM_SYSCALL_CPI_ABI)),
-                     instruction_va, acct_infos_va, acct_info_cnt, signers_seeds_va, signers_seeds_cnt);
-  ```
-
-  Assumes that a `vm_cp_state` directory exists in the current working directory. Generates a
-  unique dump for combination of (tile_id, caller_pubkey, instr_sz). */
-
-static FD_FN_UNUSED void
-dump_vm_cpi_state(fd_vm_t *vm,
-                  char const * fn_name,
-                  ulong   instruction_va,
-                  ulong   acct_infos_va,
-                  ulong   acct_info_cnt,
-                  ulong   signers_seeds_va,
-                  ulong   signers_seeds_cnt ) {
-  char filename[100];
-  fd_instr_info_t const *instr = vm->instr_ctx->instr;
-  sprintf(filename, "vm_cpi_state/%lu_%lu%lu_%hu.sysctx", fd_tile_id(), instr->program_id_pubkey.ul[0], instr->program_id_pubkey.ul[1], instr->data_sz);
-
-  // Check if file exists
-  if( access (filename, F_OK) != -1 ) {
-    return;
-  }
-
-  fd_exec_test_syscall_context_t sys_ctx = FD_EXEC_TEST_SYSCALL_CONTEXT_INIT_ZERO;
-  sys_ctx.has_instr_ctx = 1;
-  sys_ctx.has_vm_ctx = 1;
-  sys_ctx.has_syscall_invocation = 1;
-
-  // Copy function name
-  sys_ctx.syscall_invocation.function_name.size = fd_uint_min( (uint) strlen(fn_name), sizeof(sys_ctx.syscall_invocation.function_name.bytes) );
-  fd_memcpy( sys_ctx.syscall_invocation.function_name.bytes,
-             fn_name,
-             sys_ctx.syscall_invocation.function_name.size );
-
-  // VM Ctx integral fields
-  sys_ctx.vm_ctx.r1 = instruction_va;
-  sys_ctx.vm_ctx.r2 = acct_infos_va;
-  sys_ctx.vm_ctx.r3 = acct_info_cnt;
-  sys_ctx.vm_ctx.r4 = signers_seeds_va;
-  sys_ctx.vm_ctx.r5 = signers_seeds_cnt;
-
-  sys_ctx.vm_ctx.rodata_text_section_length = vm->text_sz;
-  sys_ctx.vm_ctx.rodata_text_section_offset = vm->text_off;
-
-  sys_ctx.vm_ctx.heap_max = vm->heap_max; /* should be equiv. to txn_ctx->heap_sz */
-
-  FD_SCRATCH_SCOPE_BEGIN{
-    sys_ctx.vm_ctx.rodata = fd_scratch_alloc( 8UL, PB_BYTES_ARRAY_T_ALLOCSIZE(vm->rodata_sz) );
-    sys_ctx.vm_ctx.rodata->size = (pb_size_t) vm->rodata_sz;
-    fd_memcpy( sys_ctx.vm_ctx.rodata->bytes, vm->rodata, vm->rodata_sz );
-
-    pb_size_t stack_sz = (pb_size_t) ( (vm->frame_cnt + 1)*FD_VM_STACK_GUARD_SZ*2 );
-    sys_ctx.syscall_invocation.stack_prefix = fd_scratch_alloc( 8UL, PB_BYTES_ARRAY_T_ALLOCSIZE(stack_sz) );
-    sys_ctx.syscall_invocation.stack_prefix->size = stack_sz;
-    fd_memcpy( sys_ctx.syscall_invocation.stack_prefix->bytes, vm->stack, stack_sz );
-
-    sys_ctx.syscall_invocation.heap_prefix = fd_scratch_alloc( 8UL, PB_BYTES_ARRAY_T_ALLOCSIZE(vm->heap_max) );
-    sys_ctx.syscall_invocation.heap_prefix->size = (pb_size_t) vm->instr_ctx->txn_ctx->heap_size;
-    fd_memcpy( sys_ctx.syscall_invocation.heap_prefix->bytes, vm->heap, vm->instr_ctx->txn_ctx->heap_size );
-
-    sys_ctx.vm_ctx.input_data_regions_count = vm->input_mem_regions_cnt;
-    sys_ctx.vm_ctx.input_data_regions = fd_scratch_alloc( 8UL, sizeof(fd_exec_test_input_data_region_t) * vm->input_mem_regions_cnt );
-    for( ulong i=0UL; i<vm->input_mem_regions_cnt; i++ ) {
-      sys_ctx.vm_ctx.input_data_regions[i].content = fd_scratch_alloc( 8UL, PB_BYTES_ARRAY_T_ALLOCSIZE(vm->input_mem_regions[i].region_sz) );
-      sys_ctx.vm_ctx.input_data_regions[i].content->size = (pb_size_t) vm->input_mem_regions[i].region_sz;
-      fd_memcpy( sys_ctx.vm_ctx.input_data_regions[i].content->bytes, (uchar *) vm->input_mem_regions[i].haddr, vm->input_mem_regions[i].region_sz );
-      sys_ctx.vm_ctx.input_data_regions[i].offset = vm->input_mem_regions[i].vaddr_offset;
-      sys_ctx.vm_ctx.input_data_regions[i].is_writable = vm->input_mem_regions[i].is_writable;
-    }
-
-    fd_create_instr_context_protobuf_from_instructions( &sys_ctx.instr_ctx,
-                                                        vm->instr_ctx->txn_ctx,
-                                                        vm->instr_ctx->instr );
-
-    // Serialize the protobuf to file (using mmap)
-    size_t pb_alloc_size = 100 * 1024 * 1024; // 100MB (largest so far is 19MB)
-    FILE *f = fopen(filename, "wb+");
-    if( ftruncate(fileno(f), (off_t) pb_alloc_size) != 0 ) {
-      FD_LOG_WARNING(("Failed to resize file %s", filename));
-      fclose(f);
-      return;
-    }
-
-    uchar *pb_alloc = mmap( NULL,
-                            pb_alloc_size,
-                            PROT_READ | PROT_WRITE,
-                            MAP_SHARED,
-                            fileno(f),
-                            0 /* offset */);
-    if( pb_alloc == MAP_FAILED ) {
-      FD_LOG_WARNING(( "Failed to mmap file %d", errno ));
-      fclose(f);
-      return;
-    }
-
-    pb_ostream_t stream = pb_ostream_from_buffer(pb_alloc, pb_alloc_size);
-    if( !pb_encode( &stream, FD_EXEC_TEST_SYSCALL_CONTEXT_FIELDS, &sys_ctx ) ) {
-      FD_LOG_WARNING(( "Failed to encode instruction context" ));
-    }
-    // resize file to actual size
-    if( ftruncate( fileno(f), (off_t) stream.bytes_written ) != 0 ) {
-      FD_LOG_WARNING(( "Failed to resize file %s", filename ));
-    }
-
-    fclose(f);
-
-  } FD_SCRATCH_SCOPE_END;
-}
 
 /* FIXME: ALGO EFFICIENCY */
 static inline int
@@ -325,7 +202,7 @@ fd_vm_prepare_instruction( fd_instr_info_t const *  caller_instr,
 
   /* Caller is in charge of setting an appropriate sentinel value (i.e., UCHAR_MAX) for callee_instr->program_id if not found. */
   /* We allow dead accounts to be borrowed here because that's what agave currently does.
-     https://github.com/firedancer-io/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/program-runtime/src/invoke_context.rs#L453 */
+     https://github.com/anza-xyz/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/program-runtime/src/invoke_context.rs#L453 */
   int err = fd_txn_borrowed_account_view_idx_allow_dead( instr_ctx->txn_ctx, callee_instr->program_id, &program_rec );
   if( FD_UNLIKELY( err ) ) {
     /* https://github.com/anza-xyz/agave/blob/a9ac3f55fcb2bc735db0d251eda89897a5dbaaaa/program-runtime/src/invoke_context.rs#L434 */
@@ -373,9 +250,17 @@ fd_vm_prepare_instruction( fd_instr_info_t const *  caller_instr,
    number of locked accounts per transaction (MAX_TX_ACCOUNT_LOCKS)."
 
    https://github.com/solana-labs/solana/blob/dbf06e258ae418097049e845035d7d5502fe1327/sdk/program/src/syscalls/mod.rs#L25
-   https://github.com/firedancer-io/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/programs/bpf_loader/src/syscalls/cpi.rs#L1011 */
+   https://github.com/anza-xyz/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/programs/bpf_loader/src/syscalls/cpi.rs#L1011 */
 
-#define FD_CPI_MAX_ACCOUNT_INFOS(slot_ctx) ( fd_ulong_if( FD_FEATURE_ACTIVE(slot_ctx, increase_tx_account_lock_limit), 128UL, 64UL ) )
+#define FD_CPI_MAX_ACCOUNT_INFOS           (128UL)
+/* This is just encoding what Agave says in their code comments into a
+   compile-time check, so if anyone ever inadvertently changes one of
+   the limits, they will have to take a look. */
+FD_STATIC_ASSERT( FD_CPI_MAX_ACCOUNT_INFOS==MAX_TX_ACCOUNT_LOCKS, cpi_max_account_info );
+static inline ulong
+get_cpi_max_account_infos( fd_exec_slot_ctx_t const * slot_ctx ) {
+  return fd_ulong_if( FD_FEATURE_ACTIVE( slot_ctx, increase_tx_account_lock_limit ), FD_CPI_MAX_ACCOUNT_INFOS, 64UL );
+}
 
 /* Maximum CPI instruction data size. 10 KiB was chosen to ensure that CPI
    instructions are not more limited than transaction instructions if the size
@@ -389,6 +274,7 @@ fd_vm_prepare_instruction( fd_instr_info_t const *  caller_instr,
    accounts are always within the maximum instruction account limit for BPF
    program instructions.
 
+   https://github.com/solana-labs/solana/blob/dbf06e258ae418097049e845035d7d5502fe1327/sdk/program/src/syscalls/mod.rs#L19
    https://github.com/solana-labs/solana/blob/dbf06e258ae418097049e845035d7d5502fe1327/programs/bpf_loader/src/serialization.rs#L26 */
 
 #define FD_CPI_MAX_INSTRUCTION_ACCOUNTS    (255UL)
@@ -407,12 +293,12 @@ fd_vm_syscall_cpi_check_instruction( fd_vm_t const * vm,
     if( FD_UNLIKELY( data_sz > FD_CPI_MAX_INSTRUCTION_DATA_LEN ) ) {
       FD_LOG_WARNING(( "cpi: data too long (%#lx)", data_sz ));
       // SyscallError::MaxInstructionDataLenExceeded
-      return FD_VM_ERR_SYSCALL_MAX_INSTRUCTION_DATA_LEN_EXCEEDED;
+      return FD_VM_SYSCALL_ERR_MAX_INSTRUCTION_DATA_LEN_EXCEEDED;
     }
     if( FD_UNLIKELY( acct_cnt > FD_CPI_MAX_INSTRUCTION_ACCOUNTS ) ) {
       FD_LOG_WARNING(( "cpi: too many accounts (%#lx)", acct_cnt ));
       // SyscallError::MaxInstructionAccountsExceeded
-      return FD_VM_ERR_SYSCALL_MAX_INSTRUCTION_ACCOUNTS_EXCEEDED;
+      return FD_VM_SYSCALL_ERR_MAX_INSTRUCTION_ACCOUNTS_EXCEEDED;
     }
   } else {
     // https://github.com/solana-labs/solana/blob/dbf06e258ae418097049e845035d7d5502fe1327/programs/bpf_loader/src/syscalls/cpi.rs#L1114
@@ -420,7 +306,7 @@ fd_vm_syscall_cpi_check_instruction( fd_vm_t const * vm,
     if ( FD_UNLIKELY( tot_sz > FD_VM_MAX_CPI_INSTRUCTION_SIZE ) ) {
       FD_LOG_WARNING(( "cpi: instruction too long (%#lx)", tot_sz ));
       // SyscallError::InstructionTooLarge
-      return FD_VM_ERR_SYSCALL_INSTRUCTION_TOO_LARGE;
+      return FD_VM_SYSCALL_ERR_INSTRUCTION_TOO_LARGE;
     }
   }
 
@@ -445,9 +331,10 @@ fd_vm_syscall_cpi_check_id( fd_pubkey_t const * program_id,
    https://github.com/solana-labs/solana/blob/2afde1b028ed4593da5b6c735729d8994c4bfac6/sdk/src/precompiles.rs#L93
  */
 static inline int
-fd_vm_syscall_cpi_is_precompile( fd_pubkey_t const * program_id ) {
+fd_vm_syscall_cpi_is_precompile( fd_pubkey_t const * program_id, fd_exec_slot_ctx_t const * slot_ctx ) {
   return fd_vm_syscall_cpi_check_id(program_id, fd_solana_keccak_secp_256k_program_id.key) |
-         fd_vm_syscall_cpi_check_id(program_id, fd_solana_ed25519_sig_verify_program_id.key);
+         fd_vm_syscall_cpi_check_id(program_id, fd_solana_ed25519_sig_verify_program_id.key) |
+         ( fd_vm_syscall_cpi_check_id(program_id, fd_solana_secp256r1_program_id.key) && FD_FEATURE_ACTIVE( slot_ctx, enable_secp256r1_precompile ) );
 }
 
 /* fd_vm_syscall_cpi_check_authorized_program corresponds to
@@ -473,7 +360,48 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
                     || (FD_FEATURE_ACTIVE(slot_ctx, enable_bpf_loader_set_authority_checked_ix)
                         && (instruction_data_len != 0 && instruction_data[0] == 7)) /* is_set_authority_checked_instruction() */
                     || (instruction_data_len != 0 && instruction_data[0] == 5))) /* is_close_instruction */
-            || fd_vm_syscall_cpi_is_precompile(program_id));
+            || fd_vm_syscall_cpi_is_precompile(program_id, slot_ctx));
+}
+
+/* Helper functions to get the absolute vaddrs of the serialized accounts pubkey, lamports and owner.
+  
+   For the accounts not owned by the deprecated loader, all of these offsets into the accounts metadata region
+   are static from fd_vm_acc_region_meta->metadata_region_offset.
+
+   For accounts owned by the deprecated loader, the unaligned serializer is used, which means only the pubkey 
+   and lamports offsets are static from the metadata_region_offset. The owner is serialized into the region
+   immediately following the account data region (if present) at a fixed offset.
+ */
+#define VM_SERIALIZED_PUBKEY_OFFSET   (8UL)
+#define VM_SERIALIZED_OWNER_OFFSET    (40UL)
+#define VM_SERIALIZED_LAMPORTS_OFFSET (72UL)
+
+#define VM_SERIALIZED_UNALIGNED_PUBKEY_OFFSET   (3UL)
+#define VM_SERIALIZED_UNALIGNED_LAMPORTS_OFFSET (35UL)
+
+static inline
+ulong serialized_pubkey_vaddr( fd_vm_t * vm, fd_vm_acc_region_meta_t * acc_region_meta ) {
+  return FD_VM_MEM_MAP_INPUT_REGION_START + acc_region_meta->metadata_region_offset +
+    (vm->is_deprecated ? VM_SERIALIZED_UNALIGNED_PUBKEY_OFFSET : VM_SERIALIZED_PUBKEY_OFFSET);
+}
+
+static inline
+ulong serialized_owner_vaddr( fd_vm_t * vm, fd_vm_acc_region_meta_t * acc_region_meta ) {
+  if ( vm->is_deprecated ) {
+    /* For deprecated loader programs, the owner is serialized into the start of the region
+       following the account data region (if present) at a fixed offset. */
+    return FD_VM_MEM_MAP_INPUT_REGION_START + vm->input_mem_regions[
+      acc_region_meta->has_data_region ? acc_region_meta->region_idx+2 : acc_region_meta->region_idx+1
+    ].vaddr_offset;
+  }
+
+  return FD_VM_MEM_MAP_INPUT_REGION_START + acc_region_meta->metadata_region_offset + VM_SERIALIZED_OWNER_OFFSET;
+}
+
+static inline
+ulong serialized_lamports_vaddr( fd_vm_t * vm, fd_vm_acc_region_meta_t * acc_region_meta ) {
+  return FD_VM_MEM_MAP_INPUT_REGION_START + acc_region_meta->metadata_region_offset + 
+    (vm->is_deprecated ? VM_SERIALIZED_UNALIGNED_LAMPORTS_OFFSET : VM_SERIALIZED_LAMPORTS_OFFSET);
 }
 
 /**********************************************************************
@@ -506,9 +434,13 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
   FD_VM_MEM_HADDR_LD( vm, acc_meta->pubkey_addr, alignof(uchar), sizeof(fd_pubkey_t) )
 
 /* VM_SYSCALL_CPI_ACC_INFO_T accessors */
+#define VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_VADDR( vm, acc_info, decl ) \
+  ulong decl = acc_info->lamports_addr;
 #define VM_SYSCALL_CPI_ACC_INFO_LAMPORTS( vm, acc_info, decl ) \
   ulong * decl = FD_VM_MEM_HADDR_ST( vm, acc_info->lamports_addr, alignof(ulong), sizeof(ulong) );
 
+#define VM_SYSCALL_CPI_ACC_INFO_DATA_VADDR( vm, acc_info, decl ) \
+  ulong decl = acc_info->data_addr;
 #define VM_SYSCALL_CPI_ACC_INFO_DATA( vm, acc_info, decl ) \
   uchar * decl = FD_VM_MEM_HADDR_ST( vm, acc_info->data_addr, alignof(uchar), acc_info->data_sz ); \
   ulong FD_EXPAND_THEN_CONCAT2(decl, _vm_addr) = acc_info->data_addr; \
@@ -541,7 +473,9 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
 #undef VM_SYSCALL_CPI_ACC_META_IS_WRITABLE
 #undef VM_SYSCALL_CPI_ACC_META_IS_SIGNER
 #undef VM_SYSCALL_CPI_ACC_META_PUBKEY
+#undef VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_VADDR
 #undef VM_SYSCALL_CPI_ACC_INFO_LAMPORTS
+#undef VM_SYSCALL_CPI_ACC_INFO_DATA_VADDR
 #undef VM_SYSCALL_CPI_ACC_INFO_DATA
 #undef VM_SYSCALL_CPI_ACC_INFO_METADATA
 #undef VM_SYSCALL_CPI_SET_ACC_INFO_DATA_LEN
@@ -576,12 +510,26 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
 /* VM_SYSCALL_CPI_ACC_INFO_T accessors */
 /* The lamports and the account data are stored behind RefCells,
    so we have an additional layer of indirection to unwrap. */
+#define VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_VADDR( vm, acc_info, decl )                                             \
+    /* Translate the pointer to the RefCell */                                                                   \
+    fd_vm_rc_refcell_t * FD_EXPAND_THEN_CONCAT2(decl, _box) =                                                    \
+      FD_VM_MEM_HADDR_ST( vm, acc_info->lamports_box_addr, FD_VM_RC_REFCELL_ALIGN, sizeof(fd_vm_rc_refcell_t) ); \
+    /* Extract the vaddr the RefCell points to */                                                                \
+    ulong decl = FD_EXPAND_THEN_CONCAT2(decl, _box)->addr;
+
 #define VM_SYSCALL_CPI_ACC_INFO_LAMPORTS( vm, acc_info, decl )                                                         \
     /* Translate the pointer to the RefCell */                                                                          \
     fd_vm_rc_refcell_t * FD_EXPAND_THEN_CONCAT2(decl, _box) =                                                          \
       FD_VM_MEM_HADDR_ST( vm, acc_info->lamports_box_addr, FD_VM_RC_REFCELL_ALIGN, sizeof(fd_vm_rc_refcell_t) );       \
     /* Translate the pointer to the underlying data */                                                                 \
     ulong * decl = FD_VM_MEM_HADDR_ST( vm, FD_EXPAND_THEN_CONCAT2(decl, _box)->addr, alignof(ulong), sizeof(ulong) );
+
+#define VM_SYSCALL_CPI_ACC_INFO_DATA_VADDR( vm, acc_info, decl )                                                 \
+    /* Translate the pointer to the RefCell */                                                                   \
+    fd_vm_rc_refcell_vec_t * FD_EXPAND_THEN_CONCAT2(decl, _box) =                                                \
+      FD_VM_MEM_HADDR_ST( vm, acc_info->data_box_addr, FD_VM_RC_REFCELL_ALIGN, sizeof(fd_vm_rc_refcell_vec_t) ); \
+    /* Extract the vaddr the RefCell points to */                                                                \
+    ulong decl = FD_EXPAND_THEN_CONCAT2(decl, _box)->addr;
 
 /* TODO: possibly define a refcell unwrapping macro to simplify this? */
 #define VM_SYSCALL_CPI_ACC_INFO_DATA( vm, acc_info, decl )                                                       \
@@ -604,6 +552,13 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
     ulong FD_EXPAND_THEN_CONCAT2(decl, _vm_addr) = FD_EXPAND_THEN_CONCAT2(decl, _box)->addr;                     \
     /* Declare the size of the underlying data */                                                                \
     ulong FD_EXPAND_THEN_CONCAT2(decl, _len) = FD_EXPAND_THEN_CONCAT2(decl, _box)->len;
+
+/* The data and lamports fields are in an Rc<Refcell<T>> in the Rust SDK AccountInfo */
+#define VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_RC_REFCELL_VADDR( vm, acc_info, decl ) \
+    ulong decl = acc_info->lamports_box_addr;
+
+#define VM_SYSCALL_CPI_ACC_INFO_DATA_RC_REFCELL_VADDR( vm, acc_info, decl ) \
+    ulong decl = acc_info->data_box_addr;
 
 #define VM_SYSCALL_CPI_SET_ACC_INFO_DATA_LEN( vm, acc_info, decl, len_ ) \
   FD_EXPAND_THEN_CONCAT2(decl, _box)->len = len_;
@@ -628,7 +583,11 @@ fd_vm_syscall_cpi_check_authorized_program( fd_pubkey_t const *        program_i
 #undef VM_SYSCALL_CPI_ACC_META_IS_WRITABLE
 #undef VM_SYSCALL_CPI_ACC_META_IS_SIGNER
 #undef VM_SYSCALL_CPI_ACC_META_PUBKEY
+#undef VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_VADDR
 #undef VM_SYSCALL_CPI_ACC_INFO_LAMPORTS
+#undef VM_SYSCALL_CPI_ACC_INFO_DATA_VADDR
 #undef VM_SYSCALL_CPI_ACC_INFO_DATA
 #undef VM_SYSCALL_CPI_ACC_INFO_METADATA
+#undef VM_SYSCALL_CPI_ACC_INFO_LAMPORTS_RC_REFCELL_VADDR
+#undef VM_SYSCALL_CPI_ACC_INFO_DATA_RC_REFCELL_VADDR
 #undef VM_SYSCALL_CPI_SET_ACC_INFO_DATA_LEN

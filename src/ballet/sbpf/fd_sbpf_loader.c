@@ -19,7 +19,7 @@ static FD_TL char fd_sbpf_errbuf[ FD_SBPF_ERRBUF_SZ ] = {0};
 /* fd_sbpf_loader_seterr remembers the error ID and line number of the
    current file at which the last error occurred. */
 
-__attribute__((cold,noinline)) int
+__attribute__((cold,noinline)) static int
 fd_sbpf_loader_seterr( int err,
                        int srcln ) {
   ldr_errno     = err;
@@ -89,7 +89,9 @@ _fd_int_store_if_negative( int * p,
 
 static int
 fd_sbpf_check_ehdr( fd_elf64_ehdr const * ehdr,
-                    ulong                 elf_sz ) {
+                    ulong                 elf_sz,
+                    uint                  min_version,
+                    uint                  max_version ) {
 
   /* Validate ELF magic */
   REQUIRE( ( fd_uint_load_4( ehdr->e_ident )==0x464c457fU          )
@@ -113,7 +115,12 @@ fd_sbpf_check_ehdr( fd_elf64_ehdr const * ehdr,
          & ( ehdr->e_phentsize==sizeof(fd_elf64_phdr)              )
          & ( ehdr->e_shentsize==sizeof(fd_elf64_shdr)              )
          & ( ehdr->e_shstrndx < ehdr->e_shnum                      )
-         & ( ehdr->e_flags    !=FD_ELF_EF_SBPF_V2                  ) );
+         & ( ehdr->e_flags >= min_version                          )
+         & ( max_version
+             ? ( ehdr->e_flags <= max_version )
+             : ( ehdr->e_flags != FD_ELF_EF_SBPF_V2 )
+           )
+  );
 
   /* Bounds check program header table */
 
@@ -230,7 +237,7 @@ fd_sbpf_load_phdrs( fd_sbpf_elf_info_t *  info,
 }
 
 /* FD_SBPF_SECTION_NAME_SZ_MAX is the maximum length of a symbol name cstr
-   including zero terminator. 
+   including zero terminator.
    https://github.com/solana-labs/rbpf/blob/c168a8715da668a71584ea46696d85f25c8918f6/src/elf_parser/mod.rs#L12 */
 #define FD_SBPF_SECTION_NAME_SZ_MAX (16UL)
 
@@ -472,18 +479,22 @@ fd_sbpf_load_shdrs( fd_sbpf_elf_info_t *  info,
   return 0;
 }
 
-static int
-_fd_sbpf_elf_peek( fd_sbpf_elf_info_t * info,
-                   void const *         bin,
-                   ulong                elf_sz,
-                   int                  elf_deploy_checks ) {
+fd_sbpf_elf_info_t *
+fd_sbpf_elf_peek( fd_sbpf_elf_info_t * info,
+                  void const *         bin,
+                  ulong                elf_sz,
+                  int                  elf_deploy_checks,
+                  uint                 sbpf_min_version,
+                  uint                 sbpf_max_version ) {
 
   /* ELFs must have a file header */
-  REQUIRE( elf_sz>sizeof(fd_elf64_ehdr) );
+  if( FD_UNLIKELY( elf_sz<=sizeof(fd_elf64_ehdr) ) )
+    return NULL;
 
   /* Reject overlong ELFs (using uint addressing internally).
      This is well beyond Solana's max account size of 10 MB. */
-  REQUIRE( elf_sz<=UINT_MAX );
+  if( FD_UNLIKELY( elf_sz>UINT_MAX ) )
+    return NULL;
 
   /* Initialize info struct */
   *info = (fd_sbpf_elf_info_t) {
@@ -499,6 +510,7 @@ _fd_sbpf_elf_peek( fd_sbpf_elf_info_t * info,
     .shndx_dyn        = -1,
     .shndx_dynstr     = -1,
     .phndx_dyn        = -1,
+    .sbpf_version     = 0U,
     /* !!! Keep this in sync with -Werror=missing-field-initializers */
   };
 
@@ -506,26 +518,21 @@ _fd_sbpf_elf_peek( fd_sbpf_elf_info_t * info,
   int err;
 
   /* Validate file header */
-  if( FD_UNLIKELY( (err=fd_sbpf_check_ehdr( &elf->ehdr, elf_sz ))!=0 ) )
-    return err;
+  if( FD_UNLIKELY( (err=fd_sbpf_check_ehdr( &elf->ehdr, elf_sz, sbpf_min_version, sbpf_max_version ))!=0 ) )
+    return NULL;
 
   /* Program headers */
   if( FD_UNLIKELY( (err=fd_sbpf_load_phdrs( info, elf,  elf_sz ))!=0 ) )
-    return err;
+    return NULL;
 
   /* Section headers */
   if( FD_UNLIKELY( (err=fd_sbpf_load_shdrs( info, elf,  elf_sz, elf_deploy_checks ))!=0 ) )
-    return err;
+    return NULL;
 
-  return 0;
-}
+  /* Set SBPF version from ELF e_flags */
+  info->sbpf_version = sbpf_max_version ? elf->ehdr.e_flags : 0UL;
 
-fd_sbpf_elf_info_t *
-fd_sbpf_elf_peek( fd_sbpf_elf_info_t * info,
-                  void const *         bin,
-                  ulong                elf_sz,
-                  int                  elf_deploy_checks ) {
-  return (_fd_sbpf_elf_peek( info, bin, elf_sz, elf_deploy_checks ) == 0) ? info : NULL;
+  return info;
 }
 
 /* ELF loader, part 2 **************************************************
@@ -648,7 +655,7 @@ struct fd_sbpf_loader {
 typedef struct fd_sbpf_loader fd_sbpf_loader_t;
 
 /* FD_SBPF_SYM_NAME_SZ_MAX is the maximum length of a symbol name cstr
-   including zero terminator. 
+   including zero terminator.
    https://github.com/solana-labs/rbpf/blob/c168a8715da668a71584ea46696d85f25c8918f6/src/elf_parser/mod.rs#L13 */
 #define FD_SBPF_SYM_NAME_SZ_MAX (64UL)
 
@@ -1095,7 +1102,7 @@ fd_sbpf_hash_calls( fd_sbpf_loader_t *    loader,
     /* Check for collision with syscall ID
        https://github.com/solana-labs/rbpf/blob/57139e9e1fca4f01155f7d99bc55cdcc25b0bc04/src/program.rs#L142-L146 */
     REQUIRE( !fd_sbpf_syscalls_query( loader->syscalls, pc_hash, NULL ) );
-    
+
     FD_STORE( uint, ptr+4UL, pc_hash );
   }
 

@@ -23,11 +23,19 @@ $(call add-objs,fd_hashes,fd_flamenco)
 $(call add-hdrs,fd_pubkey_utils.h)
 $(call add-objs,fd_pubkey_utils,fd_flamenco)
 
+$(call add-hdrs,fd_txncache.h)
+$(call add-objs,fd_txncache,fd_flamenco)
+
+$(call add-hdrs, tests/fd_dump_pb.h)
+$(call add-objs, tests/fd_dump_pb,fd_flamenco)
+
 $(call add-hdrs,fd_rent_lists.h)
+
+$(call make-unit-test,test_txncache,test_txncache,fd_flamenco fd_util)
 
 ifdef FD_HAS_ATOMIC
 $(call add-hdrs,fd_runtime.h fd_runtime_init.h fd_runtime_err.h)
-$(call add-objs,fd_runtime fd_runtime_init,fd_flamenco)
+$(call add-objs,fd_runtime fd_runtime_init ,fd_flamenco)
 endif
 endif
 
@@ -42,10 +50,9 @@ $(call add-objs,fd_rocksdb,fd_flamenco)
 endif
 
 ifdef FD_HAS_ATOMIC
-$(call add-hdrs,fd_txncache.h)
-$(call add-objs,fd_txncache,fd_flamenco)
+
 ifdef FD_HAS_HOSTED
-$(call make-unit-test,test_txncache,test_txncache,fd_flamenco fd_util)
+$(call make-unit-test,test_archive_block,test_archive_block, fd_flamenco fd_util fd_ballet,$(SECP256K1_LIBS))
 # TODO: Flakes
 # $(call run-unit-test,test_txncache,)
 endif

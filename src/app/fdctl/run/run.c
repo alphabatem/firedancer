@@ -3,13 +3,17 @@
 
 #include <sys/wait.h>
 #include "generated/main_seccomp.h"
+#if defined(__aarch64__)
+#include "generated/pidns.arm64_seccomp.h"
+#else
 #include "generated/pidns_seccomp.h"
+#endif
 
-#include "../../../disco/tiles.h"
 #include "../../../disco/topo/fd_pod_format.h"
 #include "../../../waltz/xdp/fd_xdp1.h"
 #include "../../../flamenco/runtime/fd_blockstore.h"
 #include "../../../flamenco/runtime/fd_txncache.h"
+#include "../../../funk/fd_funk_filemap.h"
 #include "../../../funk/fd_funk.h"
 #include "../configure/configure.h"
 
@@ -519,25 +523,23 @@ fdctl_obj_new( fd_topo_t const *     topo,
   if( FD_UNLIKELY( !strcmp( obj->name, "tile" ) ) ) {
     /* No need to do anything, tiles don't have a new. */
   } else if( FD_UNLIKELY( !strcmp( obj->name, "mcache" ) ) ) {
-    fd_mcache_new( laddr, VAL("depth"), 0UL, 0UL );
+    FD_TEST( fd_mcache_new( laddr, VAL("depth"), 0UL, 0UL ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "dcache" ) ) ) {
-    fd_dcache_new( laddr, fd_dcache_req_data_sz( VAL("mtu"), VAL("depth"), VAL("burst"), 1 ), 0UL );
+    FD_TEST( fd_dcache_new( laddr, fd_dcache_req_data_sz( VAL("mtu"), VAL("depth"), VAL("burst"), 1 ), 0UL ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "cnc" ) ) ) {
-    fd_cnc_new( laddr, 0UL, 0, fd_tickcount() );
-  } else if( FD_UNLIKELY( !strcmp( obj->name, "reasm" ) ) ) {
-    fd_tpu_reasm_new( laddr, VAL("depth"), VAL("burst"), 0UL );
+    FD_TEST( fd_cnc_new( laddr, 0UL, 0, fd_tickcount() ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "fseq" ) ) ) {
-    fd_fseq_new( laddr, ULONG_MAX );
+    FD_TEST( fd_fseq_new( laddr, ULONG_MAX ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "metrics" ) ) ) {
-    fd_metrics_new( laddr, VAL("in_cnt"), VAL("cons_cnt") );
+    FD_TEST( fd_metrics_new( laddr, VAL("in_cnt"), VAL("cons_cnt") ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "ulong" ) ) ) {
     *(ulong*)laddr = 0;
   } else if( FD_UNLIKELY( !strcmp( obj->name, "blockstore" ) ) ) {
-    fd_blockstore_new( laddr, VAL("wksp_tag"), VAL("seed"), VAL("shred_max"), VAL("slot_max"), VAL("lg_txn_max") );
+    FD_TEST( fd_blockstore_new( laddr, VAL("wksp_tag"), VAL("seed"), VAL("shred_max"), VAL("block_max"), VAL("idx_max"), VAL("txn_max") ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "funk" ) ) ) {
-    fd_funk_new( laddr, VAL("wksp_tag"), VAL("seed"), VAL("txn_max"), VAL("rec_max") );
+    FD_TEST( fd_funk_new( laddr, VAL("wksp_tag"), VAL("seed"), VAL("txn_max"), VAL("rec_max") ) );
   } else if( FD_UNLIKELY( !strcmp( obj->name, "txncache" ) ) ) {
-    fd_txncache_new( laddr, VAL("max_rooted_slots"), VAL("max_live_slots"), VAL("max_txn_per_slot") );
+    FD_TEST( fd_txncache_new( laddr, VAL("max_rooted_slots"), VAL("max_live_slots"), VAL("max_txn_per_slot"), FD_TXNCACHE_DEFAULT_MAX_CONSTIPATED_SLOTS ) );
   } else {
     FD_LOG_ERR(( "unknown object `%s`", obj->name ));
   }
@@ -611,7 +613,7 @@ initialize_workspaces( config_t * const config ) {
   if( FD_UNLIKELY( setegid( gid ) ) ) FD_LOG_ERR(( "setegid() failed (%i-%s)", errno, fd_io_strerror( errno ) ));
 }
 
-static void
+void
 initialize_stacks( config_t * const config ) {
   /* Switch to non-root uid/gid for workspace creation.  Permissions
      checks are still done as the current user. */
@@ -658,30 +660,36 @@ initialize_stacks( config_t * const config ) {
   if( FD_UNLIKELY( setegid( gid ) ) ) FD_LOG_ERR(( "setegid() failed (%i-%s)", errno, fd_io_strerror( errno ) ));
 }
 
-extern configure_stage_t hugetlbfs;
-extern configure_stage_t ethtool_channels;
-extern configure_stage_t ethtool_gro;
-extern configure_stage_t sysctl;
+extern configure_stage_t fd_cfg_stage_hugetlbfs;
+extern configure_stage_t fd_cfg_stage_ethtool_channels;
+extern configure_stage_t fd_cfg_stage_ethtool_gro;
+extern configure_stage_t fd_cfg_stage_ethtool_loopback;
+extern configure_stage_t fd_cfg_stage_sysctl;
 
 static void
 check_configure( config_t * const config ) {
-  configure_result_t check = hugetlbfs.check( config );
+  configure_result_t check = fd_cfg_stage_hugetlbfs.check( config );
   if( FD_UNLIKELY( check.result!=CONFIGURE_OK ) )
     FD_LOG_ERR(( "Huge pages are not configured correctly: %s. You can run `fdctl configure init hugetlbfs` "
                  "to create the mounts correctly. This must be done after every system restart before running "
                  "Firedancer.", check.message ));
 
-  check = ethtool_channels.check( config );
+  check = fd_cfg_stage_ethtool_channels.check( config );
   if( FD_UNLIKELY( check.result!=CONFIGURE_OK ) )
     FD_LOG_ERR(( "Network %s. You can run `fdctl configure init ethtool-channels` to set the number of channels on the "
                  "network device correctly.", check.message ));
 
-  check = ethtool_gro.check( config );
+  check = fd_cfg_stage_ethtool_gro.check( config );
   if( FD_UNLIKELY( check.result!=CONFIGURE_OK ) )
     FD_LOG_ERR(( "Network %s. You can run `fdctl configure init ethtool-gro` to disable generic-receive-offload "
                  "as required.", check.message ));
 
-  check = sysctl.check( config );
+  check = fd_cfg_stage_ethtool_loopback.check( config );
+  if( FD_UNLIKELY( check.result!=CONFIGURE_OK ) )
+    FD_LOG_ERR(( "Network %s. You can run `fdctl configure init ethtool-loopback` to disable tx-udp-segmentation "
+                 "on the loopback device.", check.message ));
+
+  check = fd_cfg_stage_sysctl.check( config );
   if( FD_UNLIKELY( check.result!=CONFIGURE_OK ) )
     FD_LOG_ERR(( "Kernel parameters are not configured correctly: %s. You can run `fdctl configure init sysctl` "
                  "to set kernel parameters correctly.", check.message ));
@@ -694,10 +702,6 @@ run_firedancer_init( config_t * const config,
   int err = stat( config->consensus.identity_path, &st );
   if( FD_UNLIKELY( -1==err && errno==ENOENT ) ) FD_LOG_ERR(( "[consensus.identity_path] key does not exist `%s`. You can generate an identity key at this path by running `fdctl keys new identity --config <toml>`", config->consensus.identity_path ));
   else if( FD_UNLIKELY( -1==err ) )             FD_LOG_ERR(( "could not stat [consensus.identity_path] `%s` (%i-%s)", config->consensus.identity_path, errno, fd_io_strerror( errno ) ));
-
-  err = stat( config->consensus.vote_account_path, &st );
-  if( FD_UNLIKELY( -1==err && errno==ENOENT ) ) FD_LOG_ERR(( "[consensus.vote_account_path] key does not exist `%s`. You can generate an vote key at this path by running `fdctl keys new vote --config <toml>`", config->consensus.vote_account_path ));
-  else if( FD_UNLIKELY( -1==err ) )             FD_LOG_ERR(( "could not stat [consensus.vote_account_path] `%s` (%i-%s)", config->consensus.vote_account_path, errno, fd_io_strerror( errno ) ));
 
   for( ulong i=0UL; i<config->consensus.authorized_voter_paths_cnt; i++ ) {
     err = stat( config->consensus.authorized_voter_paths[ i ], &st );

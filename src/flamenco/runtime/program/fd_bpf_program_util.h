@@ -26,6 +26,9 @@ struct fd_sbpf_validated_program {
   /* Backing memory for calldests and rodata */
   // uchar calldests_shmem[];
   // uchar rodata[];
+
+  /* SBPF version, SIMD-0161 */
+  ulong sbpf_version;
 };
 typedef struct fd_sbpf_validated_program fd_sbpf_validated_program_t;
 
@@ -64,6 +67,11 @@ int
 fd_bpf_load_cache_entry( fd_exec_slot_ctx_t const *     slot_ctx,
                          fd_pubkey_t const *            program_pubkey,
                          fd_sbpf_validated_program_t ** valid_prog );
+
+void
+fd_bpf_get_sbpf_versions( uint *                     sbpf_min_version,
+                          uint *                     sbpf_max_version,
+                          fd_exec_slot_ctx_t const * slot_ctx );
 
 FD_PROTOTYPES_END
 

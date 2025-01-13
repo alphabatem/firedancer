@@ -91,6 +91,7 @@ main( int     argc,
       /* text_sz          */ 0UL,
       /* entry_pc         */ 0UL,
       /* calldests        */ NULL,
+      /* sbpf_version     */ TEST_VM_DEFAULT_SBPF_VERSION,
       /* syscalls         */ NULL,
       /* trace            */ NULL,
       /* sha              */ sha,
@@ -119,7 +120,7 @@ main( int     argc,
     0UL, // point_cnt
     result_point_vaddr,
     0UL, // ret_code
-    FD_VM_ERR_SIGSEGV, // syscall_ret
+    FD_VM_SYSCALL_ERR_SEGFAULT, // syscall_ret
     expected_result_host_ptr
   ) );
 
@@ -133,7 +134,7 @@ main( int     argc,
     513UL, // point_cnt
     result_point_vaddr,
     0UL, // ret_code
-    FD_VM_ERR_INVAL, // syscall_ret
+    FD_VM_SYSCALL_ERR_INVALID_LENGTH, // syscall_ret
     expected_result_host_ptr
   ) );
 
@@ -147,7 +148,7 @@ main( int     argc,
     2UL, // point_cnt
     result_point_vaddr,
     0UL, // ret_code
-    FD_VM_ERR_INVAL, // syscall_ret
+    FD_VM_SYSCALL_ERR_INVALID_ATTRIBUTE, // syscall_ret
     expected_result_host_ptr
   ) );
 
@@ -384,7 +385,7 @@ main( int     argc,
   fd_vm_delete    ( fd_vm_leave    ( vm  ) );
   fd_sha256_delete( fd_sha256_leave( sha ) );
   fd_rng_delete   ( fd_rng_leave   ( rng ) );
-  test_vm_exec_instr_ctx_delete( instr_ctx );
+  test_vm_exec_instr_ctx_delete( instr_ctx, fd_libc_alloc_virtual() );
 
   FD_LOG_NOTICE(( "pass" ));
   fd_halt();

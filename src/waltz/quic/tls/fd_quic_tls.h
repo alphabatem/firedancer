@@ -1,9 +1,6 @@
 #ifndef HEADER_fd_src_waltz_quic_tls_fd_quic_tls_h
 #define HEADER_fd_src_waltz_quic_tls_fd_quic_tls_h
 
-#include <stdlib.h>
-#include <stdio.h>
-
 #include "../fd_quic_common.h"
 #include "../fd_quic_enum.h"
 #include "../../tls/fd_tls.h"
@@ -106,17 +103,11 @@ struct fd_quic_tls_hs_data {
   ushort      next_idx; /* next in linked list, ~0 for end */
 };
 
-struct __attribute__((aligned(128))) fd_quic_tls {
+struct fd_quic_tls {
   /* callbacks */
   fd_quic_tls_cb_secret_t              secret_cb;
   fd_quic_tls_cb_handshake_complete_t  handshake_complete_cb;
   fd_quic_tls_cb_peer_params_t         peer_params_cb;
-
-  ulong                                max_concur_handshakes;
-
-  /* array of (max_concur_handshakes) pre-allocated handshakes */
-  fd_quic_tls_hs_t *                   handshakes;
-  uchar *                              used_handshakes;
 
   /* ssl related */
   fd_tls_t tls;
@@ -134,15 +125,12 @@ struct fd_quic_tls_hs {
   fd_quic_tls_t * quic_tls;
 
   int             is_server;
-  int             is_flush;
   int             is_hs_complete;
-  int             state;
-# define FD_QUIC_TLS_HS_STATE_DEAD         0
-# define FD_QUIC_TLS_HS_STATE_NEED_INPUT   1
-# define FD_QUIC_TLS_HS_STATE_COMPLETE     3
 
   /* user defined context supplied in callbacks */
   void *          context;
+
+  ulong           next; /* alloc pool linked list */
 
   /* handshake data
      this is data that must be sent to the peer
@@ -177,6 +165,19 @@ struct fd_quic_tls_hs {
   uint  hs_data_buf_tail;
   uint  hs_data_offset[ 4 ]; /* one offset per encoding level */
 
+  /* Handshake message receive buffer
+
+     rx_hs_buf buffers messages of one encryption level (rx_enc_level).
+     rx_off is the number of bytes processed by fd_tls.  rx_sz is the
+     number of contiguous bytes received from the peer. */
+
+  ushort rx_off;
+  ushort rx_sz;
+  uchar  rx_enc_level;
+
+# define FD_QUIC_TLS_RX_DATA_SZ (2048UL)
+  uchar rx_hs_buf[ FD_QUIC_TLS_RX_DATA_SZ ];
+
   /* TLS alert code */
   uint  alert;
 
@@ -184,17 +185,11 @@ struct fd_quic_tls_hs {
   fd_quic_transport_params_t self_transport_params;
 };
 
-ulong
-fd_quic_tls_align( void );
-
-ulong
-fd_quic_tls_footprint( ulong handshake_cnt );
-
 /* fd_quic_tls_new formats an unused memory region for use as an
    fd_quic_tls_t object and joins the caller to it */
 
 fd_quic_tls_t *
-fd_quic_tls_new( void *              mem,
+fd_quic_tls_new( fd_quic_tls_t *     mem,
                  fd_quic_tls_cfg_t * cfg );
 
 /* fd_quic_delete unformats a memory region used as an fd_quic_tls_t.
@@ -204,41 +199,24 @@ fd_quic_tls_new( void *              mem,
 void *
 fd_quic_tls_delete( fd_quic_tls_t * self );
 
-/* create a quic-tls handshake object for managing
-   the handshakes for a single connection */
 fd_quic_tls_hs_t *
-fd_quic_tls_hs_new( fd_quic_tls_t * quic_tls,
-                    void *          context,
-                    int             is_server,
-                    char const *    hostname,
+fd_quic_tls_hs_new( fd_quic_tls_hs_t * self,
+                    fd_quic_tls_t *    quic_tls,
+                    void *             context,
+                    int                is_server,
                     fd_quic_transport_params_t const * self_transport_params );
 
-/* fd_quic_tls_hs_delete frees a handshake object and its resources.
-   Fine if hs is NULL. */
 void
 fd_quic_tls_hs_delete( fd_quic_tls_hs_t * hs );
 
-/* fd_quic_tls_provide_data forwards an incoming QUIC CRYPTO frame
-   containing TLS handshake message data to the underlying TLS
-   implementation.
+/* fd_quic_tls_process processes any available TLS handshake messages
+   from previously received CRYPTO frames.  Returns FD_QUIC_SUCCESS if
+   any number of messages were processed (including no messages in there
+   is not enough data).  Returns FD_QUIC_FAILED if the TLS handshake
+   failed (not recoverable). */
 
-   In the case of a failure, errors will be stored in the fd_quic_tls_t object
-
-   args
-     hs             the fd_quic_tls_hs_t object to operate on
-     enc_level      the encryption level specified in the quic packet
-     data           the data from the quic CRYPTO frame
-     data_sz        the length of the data from the quic CRYPTO frame
-
-   returns
-     FD_QUIC_SUCCESS
-     FD_QUIC_FAILED
-   */
 int
-fd_quic_tls_provide_data( fd_quic_tls_hs_t * self,
-                          uint               enc_level,
-                          uchar const *      data,
-                          ulong              data_sz );
+fd_quic_tls_process( fd_quic_tls_hs_t * self );
 
 
 /* fd_quic_tls_get_hs_data
@@ -251,7 +229,6 @@ fd_quic_tls_provide_data( fd_quic_tls_hs_t * self,
 
    the hd_data and data therein are invalidated by the following
      fd_quic_tls_pop_hs_data
-     fd_quic_tls_delete
      fd_quic_tls_hs_delete
 
    args

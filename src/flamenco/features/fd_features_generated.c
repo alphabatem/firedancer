@@ -891,9 +891,15 @@ fd_feature_id_t const ids[] = {
     .name       = "apply_cost_tracker_during_replay",
     .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
 
+  { .index      = offsetof(fd_features_t, consume_requested_cu_on_vm_err)>>3,
+    .id         = {"\x96\x30\x7a\x11\x82\xf7\xe4\xee\x64\x9d\xe0\x5b\x0f\xcc\xe5\x25\x7b\x93\x34\x69\x52\xaa\x5a\x1d\x8f\xd1\x2f\x90\xa6\x98\x75\x98"},
+                  /* B7H2caeia4ZFcpE3QcgMqbiWiBtWrdBRBSJ1DY6Ktxbq */
+    .name       = "consume_requested_cu_on_vm_err",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
   { .index      = offsetof(fd_features_t, bpf_account_data_direct_mapping)>>3,
-    .id         = {"\xca\xd6\x68\xb3\x88\x01\x19\x3f\x7e\xd4\xde\x26\xdc\x1c\x53\x2b\xf9\x20\x07\x6e\x3c\xe0\xd5\x2a\x8d\x88\x8b\x25\xda\xb6\x88\xd2"},
-                  /* EenyoWx9UMXYKpR8mW5Jmfmy2fRjzUtM7NduYMY8bx33 */
+    .id         = {"\xe3\x5a\x16\xee\xe9\x8e\x13\xd7\x1e\x4e\x93\xe2\x30\x83\x0d\x5e\x21\x50\xef\x16\x78\x38\x38\xfe\x63\xae\xba\xaa\x3d\x20\x2c\xf0"},
+                  /* GJVDwRkUPNdk9QaK4VsU4g1N41QNxhy1hevjf8kz45Mq */
     .name       = "bpf_account_data_direct_mapping",
     .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
 
@@ -1229,6 +1235,96 @@ fd_feature_id_t const ids[] = {
     .name       = "partitioned_epoch_rewards_superfeature",
     .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
 
+  { .index      = offsetof(fd_features_t, enable_secp256r1_precompile)>>3,
+    .id         = {"\x0d\x06\x71\xf0\x4f\xe3\x38\x2c\x46\xac\x54\x4a\xad\x9b\x98\x50\xa8\xa0\x26\x18\x41\x58\x58\xbf\xe8\xf0\xca\x6c\x04\x32\x18\x93"},
+                  /* sr11RdZWgbHTHxSroPALe6zgaT5A1K9LcE4nfsZS4gi */
+    .name       = "enable_secp256r1_precompile",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, get_sysvar_syscall_enabled)>>3,
+    .id         = {"\xa8\x5b\xef\x52\xf2\x62\x90\x82\x3b\xd2\x06\xdd\x10\xe7\x2c\x5b\x9c\x22\x0e\x96\x8a\xa7\x2e\x98\x8c\x7b\x02\x39\x0e\xd5\x9a\xf4"},
+                  /* CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq */
+    .name       = "get_sysvar_syscall_enabled",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, disable_sbpf_v0_execution)>>3,
+    .id         = {"\x07\xcd\x8f\x9c\x60\x1f\xb5\x1d\xe6\xc6\x4a\x0c\x80\xee\x74\x45\xb1\x33\x0c\x00\xc8\x85\x66\xfd\xbf\x9c\x04\xb1\x80\x00\x00\x00"},
+                  /* XTestFeature1111111111111111111111111111111 */
+    .name       = "disable_sbpf_v0_execution",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, reenable_sbpf_v0_execution)>>3,
+    .id         = {"\x06\xd3\xed\xd5\x9d\x7c\x93\xe5\xc4\xb1\xe9\xad\x79\x2d\x34\x27\xa1\xc3\x2f\xac\xb9\xbc\x05\x2d\xe0\x6c\x4b\x91\x80\x00\x00\x00"},
+                  /* TestFeature21111111111111111111111111111111 */
+    .name       = "reenable_sbpf_v0_execution",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, enable_sbpf_v1_deployment_and_execution)>>3,
+    .id         = {"\xff\xf3\x40\x2b\x9c\xcb\xc2\xef\x87\x25\xc8\xa9\xa3\x0d\x78\x88\xc0\xd9\xaf\xad\x60\x5e\x1a\xdf\xe8\x84\x65\xac\x59\xd5\xe4\xd5"},
+                  /* JE86WkYvTrzW8HgNmrHY7dFYpCmSptUpKupbo2AdQ9cG */
+    .name       = "enable_sbpf_v1_deployment_and_execution",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, enable_sbpf_v2_deployment_and_execution)>>3,
+    .id         = {"\xd1\x6a\x9a\x26\x8a\x6a\x8e\x40\xcc\xea\xc9\x39\xd6\x21\x78\x58\x7e\x9e\x51\x6c\x8c\xab\x5a\xec\x85\xb1\x18\x7f\xa6\xd2\xb5\xdc"},
+                  /* F6UVKh1ujTEFK3en2SyAL3cdVnqko1FVEXWhmdLRu6WP */
+    .name       = "enable_sbpf_v2_deployment_and_execution",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, enable_sbpf_v3_deployment_and_execution)>>3,
+    .id         = {"\xa5\x5e\x2c\x94\xda\x8b\xc0\xbe\x92\x50\x5b\xcc\xed\xd1\xab\x88\x9c\xed\xbd\xa6\xc9\x36\xa1\xf2\x60\x13\x3e\x95\xba\x9e\x4f\xf8"},
+                  /* C8XZNs1bfzaiT3YDeXZJ7G5swQWQv7tVzDnCxtHvnSpw */
+    .name       = "enable_sbpf_v3_deployment_and_execution",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, migrate_feature_gate_program_to_core_bpf)>>3,
+    .id         = {"\x36\x42\x5c\x66\x18\x1f\x6b\xf4\xea\x34\x18\x98\xd0\xee\x57\x8e\x44\xd3\x69\xb6\x06\x1e\xe4\xea\x37\x86\x08\xb4\x19\xbf\xbb\x7a"},
+                  /* 4eohviozzEeivk1y9UbrnekbAFMDQyJz5JjA9Y6gyvky */
+    .name       = "migrate_feature_gate_program_to_core_bpf",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, migrate_config_program_to_core_bpf)>>3,
+    .id         = {"\x12\xa9\x4d\x90\xf1\x0d\xa9\xa9\x6c\x4d\xaf\xf9\x3b\x8e\xf5\xcb\x23\xef\xa4\xa9\x27\xee\x5c\x59\xc4\xef\x9c\x08\x45\x65\xdf\xac"},
+                  /* 2Fr57nzzkLYXW695UdDxDeR5fhnZWSttZeZYemrnpGFV */
+    .name       = "migrate_config_program_to_core_bpf",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, migrate_address_lookup_table_program_to_core_bpf)>>3,
+    .id         = {"\xa5\x84\xb6\xe5\x4b\xa8\x34\x24\x94\xbb\xa3\x5d\x43\x00\x19\x22\x7e\x11\x1e\xb6\xba\xc9\x95\x77\xf9\xe1\x83\xa5\x46\x5d\xff\x48"},
+                  /* C97eKZygrkU4JxJsZdjgbUY7iQR7rKTr4NyDWo2E5pRm */
+    .name       = "migrate_address_lookup_table_program_to_core_bpf",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, migrate_stake_program_to_core_bpf)>>3,
+    .id         = {"\x4f\x6e\x58\xf2\xa5\x04\x0c\xd3\x86\x2c\xea\xf5\xe7\x5e\x1a\xc4\x52\x52\xca\xea\xdf\x75\x06\xd3\x0e\xef\x5e\x33\x25\x16\xaf\xcf"},
+                  /* 6M4oQ6eXneVhtLoiAr4yRYQY43eVLjrKbiDZDJc892yk */
+    .name       = "migrate_stake_program_to_core_bpf",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, enable_get_epoch_stake_syscall)>>3,
+    .id         = {"\x64\x88\xa2\xd0\x5a\xcc\xbb\xae\xa0\x4e\xa8\xaf\xeb\x15\xfb\x71\xa7\x5b\x27\x71\x96\x6c\x2f\x05\x0d\xfe\xf3\x44\xbb\x07\x3b\x21"},
+                  /* 7mScTYkJXsbdrcwTQRs7oeCSXoJm4WjzBsRyf8bCU3Np */
+    .name       = "enable_get_epoch_stake_syscall",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, disable_account_loader_special_case)>>3,
+    .id         = {"\xc7\x2b\x39\x35\x25\x63\x29\x7f\x69\x4f\x2d\x7f\x8c\x2c\xbb\x62\x13\x3e\x4d\xf8\xc9\xc0\x2d\x75\xed\xed\x28\x6a\x6f\x44\xe6\x8f"},
+                  /* EQUMpNFr7Nacb1sva56xn1aLfBxppEoSBH8RRVdkcD1x */
+    .name       = "disable_account_loader_special_case",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, remove_accounts_executable_flag_checks)>>3,
+    .id         = {"\xd9\xec\xca\x71\x20\x2a\x01\x8c\xfa\x7e\x4c\x2d\xed\xee\x20\x49\xc7\xc1\x11\xde\x38\xca\x69\xe8\x83\xe1\xaa\x19\x8a\x3b\xab\x57"},
+                  /* FfgtauHUWKeXTzjXkua9Px4tNGBFHKZ9WaigM5VbbzFx */
+    .name       = "remove_accounts_executable_flag_checks",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
+  { .index      = offsetof(fd_features_t, fix_alt_bn128_multiplication_input_length)>>3,
+    .id         = {"\x08\xe8\xaa\x2e\x13\xc5\xc5\x54\xe2\xc3\xb4\x0e\x26\xb4\x64\x3b\xc7\xcb\x89\x6c\xc0\x06\x05\xaa\x65\x7f\x3a\x3d\x30\xee\xf9\x05"},
+                  /* bn2puAyxUx6JUabAxYdKdJ5QHbNNmKw8dCGuGCyRrFN */
+    .name       = "fix_alt_bn128_multiplication_input_length",
+    .cleaned_up = {UINT_MAX, UINT_MAX, UINT_MAX} },
+
   { .index = ULONG_MAX }
 };
 
@@ -1323,7 +1419,6 @@ fd_feature_id_query( ulong prefix ) {
   case 0x073a0a7d3f570b55: return &ids[  82 ];
   case 0x4d6ae02c256bdf10: return &ids[  83 ];
   case 0x5bf898a97b29c67f: return &ids[  84 ];
-  case 0x2e2d4501d149cd2c: return &ids[  84 ];
   case 0xe8f10f26141749dd: return &ids[  85 ];
   case 0xe02ac5f848d395d8: return &ids[  86 ];
   case 0x7b285d0430faf2fc: return &ids[  87 ];
@@ -1386,63 +1481,78 @@ fd_feature_id_query( ulong prefix ) {
   case 0x8ff9cf8537529ed8: return &ids[ 144 ];
   case 0xd6120d1b80de5fea: return &ids[ 145 ];
   case 0xca9ab2701c9aa81b: return &ids[ 146 ];
-  case 0x3f190188b368d6ca: return &ids[ 147 ];
-  case 0x55d3a0c392cf63e0: return &ids[ 148 ];
-  case 0x0e7aa95037c5daac: return &ids[ 149 ];
-  case 0xe2d13039d5f9c6a6: return &ids[ 150 ];
-  case 0xcae3ec6191402713: return &ids[ 151 ];
-  case 0xa6b1a5bbb608b7c9: return &ids[ 152 ];
-  case 0x50a615bae8ca3874: return &ids[ 153 ];
-  case 0xda4dd6055b75ae43: return &ids[ 154 ];
-  case 0x2f51d89fe8ee0500: return &ids[ 155 ];
-  case 0x61aaf185493a599f: return &ids[ 156 ];
-  case 0x74326f811fd7d861: return &ids[ 157 ];
-  case 0x2bd7391d0e103c41: return &ids[ 158 ];
-  case 0x401b668e4b13b8f9: return &ids[ 159 ];
-  case 0x74b022574093eeec: return &ids[ 160 ];
-  case 0x81b8fd99bea25f9b: return &ids[ 161 ];
-  case 0x3cbf822ccb2eebd4: return &ids[ 162 ];
-  case 0xe9d32123513c4d0d: return &ids[ 163 ];
-  case 0x86fa44f01141c71a: return &ids[ 163 ];
-  case 0x64205286d7935342: return &ids[ 164 ];
-  case 0x97f912be04ecd673: return &ids[ 165 ];
-  case 0x4b241cb4c6f3b3b2: return &ids[ 166 ];
-  case 0x21746beaa849f9d9: return &ids[ 167 ];
-  case 0x9bb55b5df1c396c5: return &ids[ 168 ];
-  case 0x6b9b55aefe23036c: return &ids[ 169 ];
-  case 0xe779d032af3fc8c8: return &ids[ 170 ];
-  case 0x583989aa9681db6a: return &ids[ 171 ];
-  case 0xa511cde5058d996f: return &ids[ 172 ];
-  case 0xa414b36a8ea378a1: return &ids[ 173 ];
-  case 0x6c49f08f6ae2dad4: return &ids[ 174 ];
-  case 0x8c2c2963ae9f420c: return &ids[ 175 ];
-  case 0xcd42326b6c24cb0e: return &ids[ 176 ];
-  case 0xd17b392feb1e0fe6: return &ids[ 177 ];
-  case 0x0207866b7b2c7452: return &ids[ 178 ];
-  case 0x592e701c2ba17409: return &ids[ 179 ];
-  case 0xbe955088bcb5a209: return &ids[ 180 ];
-  case 0xfbce25936c716309: return &ids[ 181 ];
-  case 0x116e31cc55ce7d0b: return &ids[ 182 ];
-  case 0x8c43e9b9ea49be60: return &ids[ 183 ];
-  case 0x9b6307ae6da60a0b: return &ids[ 184 ];
-  case 0xf423d4e1d688cb0e: return &ids[ 185 ];
-  case 0xa1518043438beb0d: return &ids[ 186 ];
-  case 0xdb27ab6a4a6379d5: return &ids[ 187 ];
-  case 0x814079c434b79c66: return &ids[ 188 ];
-  case 0xfde0b578d38fc5a1: return &ids[ 189 ];
-  case 0xf711255aedfe2d0d: return &ids[ 190 ];
-  case 0x81f658d2653a6051: return &ids[ 191 ];
-  case 0xf1f206f6027db529: return &ids[ 192 ];
-  case 0x1d15c9469c7c0ca8: return &ids[ 193 ];
-  case 0xb6edac8134dff06e: return &ids[ 194 ];
-  case 0x7e4172e5ba362509: return &ids[ 195 ];
-  case 0x8ba9e9038d9fdcff: return &ids[ 196 ];
-  case 0xafe148ad652172dd: return &ids[ 197 ];
-  case 0x91a7af96555ea309: return &ids[ 198 ];
-  case 0x8e1411a93085cb0e: return &ids[ 199 ];
-  case 0x0b9047b5bb9ef961: return &ids[ 200 ];
-  case 0xa5a66405d0ab6309: return &ids[ 201 ];
-  case 0x81fcbfa0d0f6b105: return &ids[ 202 ];
+  case 0xeee4f782117a3096: return &ids[ 147 ];
+  case 0xd7138ee9ee165ae3: return &ids[ 148 ];
+  case 0x55d3a0c392cf63e0: return &ids[ 149 ];
+  case 0x0e7aa95037c5daac: return &ids[ 150 ];
+  case 0xe2d13039d5f9c6a6: return &ids[ 151 ];
+  case 0xcae3ec6191402713: return &ids[ 152 ];
+  case 0xa6b1a5bbb608b7c9: return &ids[ 153 ];
+  case 0x50a615bae8ca3874: return &ids[ 154 ];
+  case 0xda4dd6055b75ae43: return &ids[ 155 ];
+  case 0x2f51d89fe8ee0500: return &ids[ 156 ];
+  case 0x61aaf185493a599f: return &ids[ 157 ];
+  case 0x74326f811fd7d861: return &ids[ 158 ];
+  case 0x2bd7391d0e103c41: return &ids[ 159 ];
+  case 0x401b668e4b13b8f9: return &ids[ 160 ];
+  case 0x74b022574093eeec: return &ids[ 161 ];
+  case 0x81b8fd99bea25f9b: return &ids[ 162 ];
+  case 0x3cbf822ccb2eebd4: return &ids[ 163 ];
+  case 0xe9d32123513c4d0d: return &ids[ 164 ];
+  case 0x64205286d7935342: return &ids[ 165 ];
+  case 0x97f912be04ecd673: return &ids[ 166 ];
+  case 0x4b241cb4c6f3b3b2: return &ids[ 167 ];
+  case 0x21746beaa849f9d9: return &ids[ 168 ];
+  case 0x9bb55b5df1c396c5: return &ids[ 169 ];
+  case 0x6b9b55aefe23036c: return &ids[ 170 ];
+  case 0xe779d032af3fc8c8: return &ids[ 171 ];
+  case 0x583989aa9681db6a: return &ids[ 172 ];
+  case 0xa511cde5058d996f: return &ids[ 173 ];
+  case 0xa414b36a8ea378a1: return &ids[ 174 ];
+  case 0x6c49f08f6ae2dad4: return &ids[ 175 ];
+  case 0x8c2c2963ae9f420c: return &ids[ 176 ];
+  case 0xcd42326b6c24cb0e: return &ids[ 177 ];
+  case 0xd17b392feb1e0fe6: return &ids[ 178 ];
+  case 0x0207866b7b2c7452: return &ids[ 179 ];
+  case 0x592e701c2ba17409: return &ids[ 180 ];
+  case 0xbe955088bcb5a209: return &ids[ 181 ];
+  case 0xfbce25936c716309: return &ids[ 182 ];
+  case 0x116e31cc55ce7d0b: return &ids[ 183 ];
+  case 0x8c43e9b9ea49be60: return &ids[ 184 ];
+  case 0x9b6307ae6da60a0b: return &ids[ 185 ];
+  case 0xf423d4e1d688cb0e: return &ids[ 186 ];
+  case 0xa1518043438beb0d: return &ids[ 187 ];
+  case 0xdb27ab6a4a6379d5: return &ids[ 188 ];
+  case 0x814079c434b79c66: return &ids[ 189 ];
+  case 0xfde0b578d38fc5a1: return &ids[ 190 ];
+  case 0xf711255aedfe2d0d: return &ids[ 191 ];
+  case 0x81f658d2653a6051: return &ids[ 192 ];
+  case 0xf1f206f6027db529: return &ids[ 193 ];
+  case 0x1d15c9469c7c0ca8: return &ids[ 194 ];
+  case 0xb6edac8134dff06e: return &ids[ 195 ];
+  case 0x7e4172e5ba362509: return &ids[ 196 ];
+  case 0x8ba9e9038d9fdcff: return &ids[ 197 ];
+  case 0xafe148ad652172dd: return &ids[ 198 ];
+  case 0x91a7af96555ea309: return &ids[ 199 ];
+  case 0x8e1411a93085cb0e: return &ids[ 200 ];
+  case 0x0b9047b5bb9ef961: return &ids[ 201 ];
+  case 0xa5a66405d0ab6309: return &ids[ 202 ];
+  case 0x81fcbfa0d0f6b105: return &ids[ 203 ];
+  case 0x2c38e34ff071060d: return &ids[ 204 ];
+  case 0x829062f252ef5ba8: return &ids[ 205 ];
+  case 0x1db51f609c8fcd07: return &ids[ 206 ];
+  case 0xe5937c9dd5edd306: return &ids[ 207 ];
+  case 0xefc2cb9c2b40f3ff: return &ids[ 208 ];
+  case 0x408e6a8a269a6ad1: return &ids[ 209 ];
+  case 0xbec08bda942c5ea5: return &ids[ 210 ];
+  case 0xf46b1f18665c4236: return &ids[ 211 ];
+  case 0xa9a90df1904da912: return &ids[ 212 ];
+  case 0x2434a84be5b684a5: return &ids[ 213 ];
+  case 0xd30c04a5f2586e4f: return &ids[ 214 ];
+  case 0xaebbcc5ad0a28864: return &ids[ 215 ];
+  case 0x7f29632535392bc7: return &ids[ 216 ];
+  case 0x8c012a2071caecd9: return &ids[ 217 ];
+  case 0x54c5c5132eaae808: return &ids[ 218 ];
   default: break;
   }
 
@@ -1598,61 +1708,77 @@ FD_STATIC_ASSERT( offsetof( fd_features_t, enable_request_heap_frame_ix         
 FD_STATIC_ASSERT( offsetof( fd_features_t, prevent_rent_paying_rent_recipients                     )>>3==144UL, layout );
 FD_STATIC_ASSERT( offsetof( fd_features_t, delay_visibility_of_program_deployment                  )>>3==145UL, layout );
 FD_STATIC_ASSERT( offsetof( fd_features_t, apply_cost_tracker_during_replay                        )>>3==146UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, bpf_account_data_direct_mapping                         )>>3==147UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, add_set_tx_loaded_accounts_data_size_instruction        )>>3==148UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, switch_to_new_elf_parser                                )>>3==149UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, round_up_heap_size                                      )>>3==150UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, remove_bpf_loader_incorrect_program_id                  )>>3==151UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, include_loaded_accounts_data_size_in_fee_calculation    )>>3==152UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, native_programs_consume_cu                              )>>3==153UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, simplify_writable_program_account_check                 )>>3==154UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, stop_truncating_strings_in_syscalls                     )>>3==155UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, clean_up_delegation_errors                              )>>3==156UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, vote_state_add_vote_latency                             )>>3==157UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, checked_arithmetic_in_fee_validation                    )>>3==158UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, last_restart_slot_sysvar                                )>>3==159UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, reduce_stake_warmup_cooldown                            )>>3==160UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, revise_turbine_epoch_stakes                             )>>3==161UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_poseidon_syscall                                 )>>3==162UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, timely_vote_credits                                     )>>3==163UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, remaining_compute_units_syscall_enabled                 )>>3==164UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_program_runtime_v2_and_loader_v4                 )>>3==165UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, require_rent_exempt_split_destination                   )>>3==166UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, better_error_codes_for_tx_lamport_check                 )>>3==167UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_alt_bn128_compression_syscall                    )>>3==168UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, programify_feature_gate_program                         )>>3==169UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick2                                 )>>3==170UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick3                                 )>>3==171UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick4                                 )>>3==172UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick5                                 )>>3==173UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick6                                 )>>3==174UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, validate_fee_collector_account                          )>>3==175UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_zk_transfer_with_fee                             )>>3==176UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, drop_legacy_shreds                                      )>>3==177UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, consume_blockstore_duplicate_proofs                     )>>3==178UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, index_erasure_conflict_duplicate_proofs                 )>>3==179UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, curve25519_restrict_msm_length                          )>>3==180UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, allow_commission_decrease_at_any_time                   )>>3==181UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, merkle_conflict_duplicate_proofs                        )>>3==182UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, disable_bpf_loader_instructions                         )>>3==183UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_executable_meta_update_in_bpf_loader          )>>3==184UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_zk_proof_from_account                            )>>3==185UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, cost_model_requested_write_lock_cost                    )>>3==186UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_gossip_duplicate_proof_ingestion                 )>>3==187UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_chained_merkle_shreds                            )>>3==188UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, remove_rounding_in_fee_calculation                      )>>3==189UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, enable_tower_sync_ix                                    )>>3==190UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_unused_legacy_vote_plumbing                   )>>3==191UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, reward_full_priority_fee                                )>>3==192UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, disable_rent_fees_collection                            )>>3==193UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, add_new_reserved_account_keys                           )>>3==194UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, chained_merkle_conflict_duplicate_proofs                )>>3==195UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, simplify_alt_bn128_syscall_error_codes                  )>>3==196UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, abort_on_invalid_curve                                  )>>3==197UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, ed25519_precompile_verify_strict                        )>>3==198UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, zk_elgamal_proof_program_enabled                        )>>3==199UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, move_stake_and_move_lamports_ixs                        )>>3==200UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_legacy_vote_ixs                               )>>3==201UL, layout );
-FD_STATIC_ASSERT( offsetof( fd_features_t, partitioned_epoch_rewards_superfeature                  )>>3==202UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, consume_requested_cu_on_vm_err                          )>>3==147UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, bpf_account_data_direct_mapping                         )>>3==148UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, add_set_tx_loaded_accounts_data_size_instruction        )>>3==149UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, switch_to_new_elf_parser                                )>>3==150UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, round_up_heap_size                                      )>>3==151UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, remove_bpf_loader_incorrect_program_id                  )>>3==152UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, include_loaded_accounts_data_size_in_fee_calculation    )>>3==153UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, native_programs_consume_cu                              )>>3==154UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, simplify_writable_program_account_check                 )>>3==155UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, stop_truncating_strings_in_syscalls                     )>>3==156UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, clean_up_delegation_errors                              )>>3==157UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, vote_state_add_vote_latency                             )>>3==158UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, checked_arithmetic_in_fee_validation                    )>>3==159UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, last_restart_slot_sysvar                                )>>3==160UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, reduce_stake_warmup_cooldown                            )>>3==161UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, revise_turbine_epoch_stakes                             )>>3==162UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_poseidon_syscall                                 )>>3==163UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, timely_vote_credits                                     )>>3==164UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, remaining_compute_units_syscall_enabled                 )>>3==165UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_program_runtime_v2_and_loader_v4                 )>>3==166UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, require_rent_exempt_split_destination                   )>>3==167UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, better_error_codes_for_tx_lamport_check                 )>>3==168UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_alt_bn128_compression_syscall                    )>>3==169UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, programify_feature_gate_program                         )>>3==170UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick2                                 )>>3==171UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick3                                 )>>3==172UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick4                                 )>>3==173UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick5                                 )>>3==174UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, update_hashes_per_tick6                                 )>>3==175UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, validate_fee_collector_account                          )>>3==176UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_zk_transfer_with_fee                             )>>3==177UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, drop_legacy_shreds                                      )>>3==178UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, consume_blockstore_duplicate_proofs                     )>>3==179UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, index_erasure_conflict_duplicate_proofs                 )>>3==180UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, curve25519_restrict_msm_length                          )>>3==181UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, allow_commission_decrease_at_any_time                   )>>3==182UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, merkle_conflict_duplicate_proofs                        )>>3==183UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, disable_bpf_loader_instructions                         )>>3==184UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_executable_meta_update_in_bpf_loader          )>>3==185UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_zk_proof_from_account                            )>>3==186UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, cost_model_requested_write_lock_cost                    )>>3==187UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_gossip_duplicate_proof_ingestion                 )>>3==188UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_chained_merkle_shreds                            )>>3==189UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, remove_rounding_in_fee_calculation                      )>>3==190UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_tower_sync_ix                                    )>>3==191UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_unused_legacy_vote_plumbing                   )>>3==192UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, reward_full_priority_fee                                )>>3==193UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, disable_rent_fees_collection                            )>>3==194UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, add_new_reserved_account_keys                           )>>3==195UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, chained_merkle_conflict_duplicate_proofs                )>>3==196UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, simplify_alt_bn128_syscall_error_codes                  )>>3==197UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, abort_on_invalid_curve                                  )>>3==198UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, ed25519_precompile_verify_strict                        )>>3==199UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, zk_elgamal_proof_program_enabled                        )>>3==200UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, move_stake_and_move_lamports_ixs                        )>>3==201UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, deprecate_legacy_vote_ixs                               )>>3==202UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, partitioned_epoch_rewards_superfeature                  )>>3==203UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_secp256r1_precompile                             )>>3==204UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, get_sysvar_syscall_enabled                              )>>3==205UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, disable_sbpf_v0_execution                               )>>3==206UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, reenable_sbpf_v0_execution                              )>>3==207UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_sbpf_v1_deployment_and_execution                 )>>3==208UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_sbpf_v2_deployment_and_execution                 )>>3==209UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_sbpf_v3_deployment_and_execution                 )>>3==210UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, migrate_feature_gate_program_to_core_bpf                )>>3==211UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, migrate_config_program_to_core_bpf                      )>>3==212UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, migrate_address_lookup_table_program_to_core_bpf        )>>3==213UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, migrate_stake_program_to_core_bpf                       )>>3==214UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, enable_get_epoch_stake_syscall                          )>>3==215UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, disable_account_loader_special_case                     )>>3==216UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, remove_accounts_executable_flag_checks                  )>>3==217UL, layout );
+FD_STATIC_ASSERT( offsetof( fd_features_t, fix_alt_bn128_multiplication_input_length               )>>3==218UL, layout );
 
 FD_STATIC_ASSERT( sizeof( fd_features_t )>>3==FD_FEATURE_ID_CNT, layout );

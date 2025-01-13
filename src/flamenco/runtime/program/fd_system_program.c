@@ -563,14 +563,6 @@ fd_system_program_exec_transfer_with_seed( fd_exec_instr_ctx_t *                
   ulong const from_base_idx = 1UL;
   ulong const to_idx        = 2UL;
 
-  /* https://github.com/solana-labs/solana/blob/v1.17.22/programs/system/src/system_processor.rs#L264-L270 */
-
-  if( FD_UNLIKELY( args->lamports == 0UL ) ) {
-    return 0;
-  }
-
-  /* https://github.com/solana-labs/solana/blob/v1.17.22/programs/system/src/system_processor.rs#L272-L282 */
-
   if( FD_UNLIKELY( !fd_instr_acc_is_signer_idx( ctx->instr, from_base_idx ) ) ) {
     /* Max msg_sz: 37 - 2 + 45 = 80 < 127 => we can use printf */
     fd_log_collector_printf_dangerous_max_127( ctx,
@@ -624,7 +616,7 @@ fd_system_program_execute( fd_exec_instr_ctx_t * ctx ) {
   fd_bincode_decode_ctx_t decode =
     { .data    = data,
       .dataend = data + ctx->instr->data_sz,
-      .valloc  = fd_scratch_virtual() };
+      .valloc  = fd_spad_virtual( ctx->txn_ctx->spad ) };
   /* Fail if the number of bytes consumed by deserialize exceeds 1232 */
   if( fd_system_program_instruction_decode( &instruction, &decode ) ||
       (ulong)data + 1232UL < (ulong)decode.data )
@@ -701,7 +693,7 @@ fd_system_program_execute( fd_exec_instr_ctx_t * ctx ) {
   }
   }
 
-  fd_bincode_destroy_ctx_t destroy = { .valloc = ctx->valloc };
+  fd_bincode_destroy_ctx_t destroy = { .valloc = fd_spad_virtual( ctx->txn_ctx->spad ) };
   fd_system_program_instruction_destroy( &instruction, &destroy );
   return result;
 }

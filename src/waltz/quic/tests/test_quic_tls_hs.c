@@ -1,13 +1,9 @@
 /* test_quic_tls_hs performs a handshake using the fd_quic_tls API.
    (fd_quic_tls is a light wrapper over fd_tls) */
 
-#include <signal.h>
-
 #include "../../tls/test_tls_helper.h"
 #include "../tls/fd_quic_tls.h"
 #include "../templ/fd_quic_transport_params.h"
-#include "../../../util/net/fd_ip4.h"
-#include "../../../ballet/x509/fd_x509_mock.h"
 
 // test transport parameters
 static uchar const test_tp[] =
@@ -20,7 +16,6 @@ static uchar const test_tp[] =
 typedef struct my_quic_tls my_quic_tls_t;
 struct my_quic_tls {
   int is_server;
-  int is_flush;
   int is_hs_complete;
 
   int state;
@@ -60,7 +55,18 @@ my_transport_params( void *        context,
   FD_TEST( 0==memcmp( quic_tp, test_tp, quic_tp_sz ) );
 }
 
-static uchar test_quic_tls_mem[ 288144UL ] __attribute__((aligned(128)));
+static void
+fd_quic_tls_provide_data( fd_quic_tls_hs_t * tls_hs,
+                          uint               enc_level,
+                          uchar const *      msg,
+                          ulong              msg_sz ) {
+  FD_TEST( msg_sz<=FD_QUIC_TLS_RX_DATA_SZ );
+  tls_hs->rx_enc_level = (uchar)enc_level;
+  tls_hs->rx_sz        = (ushort)msg_sz;
+  tls_hs->rx_off       = 0;
+  fd_memcpy( tls_hs->rx_hs_buf, msg, msg_sz );
+  fd_quic_tls_process( tls_hs );
+}
 
 int
 main( int     argc,
@@ -70,7 +76,8 @@ main( int     argc,
   fd_rng_t  _rng[1];   fd_rng_t * rng    = fd_rng_join   ( fd_rng_new   ( _rng, 0U, 0UL ) );
 
   /* Generate certificate key */
-  fd_tls_test_sign_ctx_t sign_ctx = fd_tls_test_sign_ctx( rng );
+  fd_tls_test_sign_ctx_t sign_ctx[1];
+  fd_tls_test_sign_ctx( sign_ctx, rng );
 
   // config parameters
   fd_quic_tls_cfg_t cfg = {
@@ -79,7 +86,7 @@ main( int     argc,
     .peer_params_cb        = my_transport_params,
 
     .max_concur_handshakes = 16,
-    .cert_public_key       = sign_ctx.public_key,
+    .cert_public_key       = sign_ctx->public_key,
     .signer                = fd_tls_test_sign( &sign_ctx ),
   };
 
@@ -90,36 +97,27 @@ main( int     argc,
   fd_quic_dump_transport_params( tmp_tp, stdout );
   fflush( stdout );
 
-  ulong tls_align     = fd_quic_tls_align();
-  ulong tls_footprint = fd_quic_tls_footprint( cfg.max_concur_handshakes );
-
-  FD_LOG_INFO(( "fd_quic_tls_t align:     %lu bytes", tls_align     ));
-  FD_LOG_INFO(( "fd_quic_tls_t footprint: %lu bytes", tls_footprint ));
-  FD_TEST( tls_footprint<=sizeof(test_quic_tls_mem) );
-
-  fd_quic_tls_t * quic_tls = fd_quic_tls_new( test_quic_tls_mem, &cfg );
+  fd_quic_tls_t _quic_tls[1];
+  fd_quic_tls_t * quic_tls = fd_quic_tls_new( _quic_tls, &cfg );
   FD_TEST( quic_tls );
 
-  my_quic_tls_t tls_client[1] = {0};
-  my_quic_tls_t tls_server[1] = {0};
+  my_quic_tls_t    tls_client[1] = {0};
+  fd_quic_tls_hs_t hs_client[1];
+  FD_TEST( fd_quic_tls_hs_new(
+      hs_client,
+      quic_tls,
+      tls_client,
+      0 /* is_server */,
+      tmp_tp ) );
 
-  //uchar   cli_dst_conn_id[1] = {0};
-  //ulong  cli_dst_conn_id_sz = 0;
-  fd_quic_tls_hs_t * hs_client = fd_quic_tls_hs_new( quic_tls,
-                                                     tls_client,
-                                                     0 /* is_server */,
-                                                     "localhost",
-                                                     tmp_tp );
-  FD_TEST( hs_client );
-
-  //uchar   svr_dst_conn_id[1] = {0};
-  //ulong  svr_dst_conn_id_sz = 0;
-  fd_quic_tls_hs_t * hs_server = fd_quic_tls_hs_new( quic_tls,
-                                                     tls_server,
-                                                     1 /* is_server */,
-                                                     "localhost",
-                                                     tmp_tp );
-  FD_TEST( hs_server );
+  my_quic_tls_t    tls_server[1] = {0};
+  fd_quic_tls_hs_t hs_server[1];
+  FD_TEST( fd_quic_tls_hs_new(
+      hs_server,
+      quic_tls,
+      tls_server,
+      1 /* is_server */,
+      tmp_tp ) );
 
   // generate initial secrets for client
 
@@ -128,9 +126,6 @@ main( int     argc,
 
   // start client handshake
   // client fd_quic_tls_hs_t is primed upon creation
-
-  int provide_rc = fd_quic_tls_provide_data( hs_client, FD_TLS_LEVEL_INITIAL, NULL, 0UL );
-  FD_TEST( provide_rc==FD_QUIC_SUCCESS );
 
   FD_LOG_INFO(( "entering main handshake loop" ));
 
@@ -158,8 +153,7 @@ main( int     argc,
       // collect fragments at the same enc/sec level, then encrypt
       // ... then decrypt and forward
 
-      int provide_rc = fd_quic_tls_provide_data( hs_server, hs_data->enc_level, hs_data->data, hs_data->data_sz );
-      FD_TEST( provide_rc!=FD_QUIC_FAILED );
+      fd_quic_tls_provide_data( hs_server, hs_data->enc_level, hs_data->data, hs_data->data_sz );
 
       // remove hs_data from head of list
       //tls_client->hs_data = hs_data->next;
@@ -182,7 +176,7 @@ main( int     argc,
       FD_LOG_DEBUG(( "provide quic data server->client" ));
 
       // here we need encrypt/decrypt
-      FD_TEST( fd_quic_tls_provide_data( hs_client, hs_data->enc_level, hs_data->data, hs_data->data_sz )!=FD_QUIC_FAILED );
+      fd_quic_tls_provide_data( hs_client, hs_data->enc_level, hs_data->data, hs_data->data_sz );
 
       // remove hs_data from head of list
       fd_quic_tls_pop_hs_data( hs_server, hs_data->enc_level );

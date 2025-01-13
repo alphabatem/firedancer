@@ -118,8 +118,8 @@ publish_pack( void * _arg, ulong tspub, ulong sig, ulong sz ) {
 }
 
 static void
-register_tick( void * _arg                FD_PARAM_UNUSED, 
-               ulong  current_leader_slot FD_PARAM_UNUSED, 
+register_tick( void * _arg                FD_PARAM_UNUSED,
+               ulong  current_leader_slot FD_PARAM_UNUSED,
                uchar  hash[ static 32 ]   FD_PARAM_UNUSED ) { }
 
 /* The PoH tile needs to interact with the Agave address space to
@@ -239,14 +239,21 @@ during_frag( fd_poh_ctx_t * ctx,
     fd_poh_tile_init_stakes( ctx->poh_tile_ctx, dcache_entry );
     return;
   }
-  
-  int is_frag_for_prior_leader_slot = 0;
-  if( FD_LIKELY( fd_disco_poh_sig_pkt_type( sig )==POH_PKT_TYPE_DONE_PACKING ||
-                  fd_disco_poh_sig_pkt_type( sig )==POH_PKT_TYPE_MICROBLOCK ) ) {
-    ulong slot = fd_disco_poh_sig_slot( sig );
 
+  ulong pkt_type;
+  ulong slot;
+  if( FD_UNLIKELY( in_idx==ctx->pack_in_idx ) ) {
+    pkt_type = fd_disco_poh_sig_pkt_type( sig );
+    slot = fd_disco_poh_sig_slot( sig );
+  } else {
+    pkt_type = POH_PKT_TYPE_MICROBLOCK;
+    slot = fd_disco_bank_sig_slot( sig );
+  }
+
+  int is_frag_for_prior_leader_slot = 0;
+  if( FD_LIKELY( pkt_type==POH_PKT_TYPE_DONE_PACKING || pkt_type==POH_PKT_TYPE_MICROBLOCK ) ) {
     /* The following sequence is possible...
-    
+
         1. We become leader in slot 10
         2. While leader, we switch to a fork that is on slot 8, where
             we are leader
@@ -261,7 +268,7 @@ during_frag( fd_poh_ctx_t * ctx,
       even if we are reset back in time (to prevent duplicate blocks). */
     is_frag_for_prior_leader_slot = slot<ctx->poh_tile_ctx->highwater_leader_slot;
   }
-  
+
   if( FD_UNLIKELY( in_idx==ctx->pack_in_idx ) ) {
     /* We now know the real amount of microblocks published, so set an
        exact bound for once we receive them. */
@@ -290,10 +297,6 @@ during_frag( fd_poh_ctx_t * ctx,
     FD_TEST( raw_sz<=1024*USHORT_MAX );
     fd_memcpy( ctx->_txns, src, raw_sz-sizeof(fd_microblock_trailer_t) );
     fd_memcpy( ctx->_microblock_trailer, src+(sz * sizeof(fd_txn_p_t)), sizeof(fd_microblock_trailer_t) );
-    if( ctx->_microblock_trailer->bank_idx>=ctx->bank_cnt ) {
-      FD_LOG_ERR(("bad bank idx - bank_idx: %lu, bank_cnt: %lu ",  ctx->_microblock_trailer->bank_idx, ctx->bank_cnt));
-    }
-    FD_TEST( ctx->_microblock_trailer->bank_idx<ctx->bank_cnt );
 
     ctx->filter_frag = is_frag_for_prior_leader_slot;
   }
@@ -304,13 +307,11 @@ after_frag( fd_poh_ctx_t *      ctx,
             ulong               in_idx,
             ulong               seq,
             ulong               sig,
-            ulong               chunk,
             ulong               sz,
             ulong               tsorig,
             fd_stem_context_t * stem ) {
   (void)in_idx;
   (void)seq;
-  (void)chunk;
   (void)tsorig;
   (void)stem;
 

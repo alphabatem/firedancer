@@ -88,7 +88,7 @@ send_quic_transactions( fd_quic_t *         quic,
   quic->cb.conn_hs_complete = cb_conn_hs_complete;
   quic->cb.stream_notify    = cb_stream_notify;
 
-  fd_quic_conn_t * conn = fd_quic_connect( quic, dst_ip, dst_port, NULL );
+  fd_quic_conn_t * conn = fd_quic_connect( quic, dst_ip, dst_port );
   while ( FD_LIKELY( !( g_conn_hs_complete || g_conn_final ) ) ) {
     fd_quic_service( quic );
     fd_quic_udpsock_service( udpsock );
@@ -142,13 +142,13 @@ txn_cmd_fn( args_t *         args,
   ready_cmd_fn( args, config );
 
   fd_quic_limits_t quic_limits = {
-    .conn_cnt         = 1UL,
-    .handshake_cnt    = 1UL,
-    .conn_id_cnt      = 4UL,
-    .rx_stream_cnt    = 1UL,
+    .conn_cnt         =  1UL,
+    .handshake_cnt    =  1UL,
+    .conn_id_cnt      =  4UL,
+    .stream_id_cnt    = 64UL,
     .inflight_pkt_cnt = 64UL,
     .tx_buf_sz        = fd_ulong_pow2_up( FD_TXN_MTU ),
-    .stream_pool_cnt  = 16
+    .stream_pool_cnt  = 16UL
   };
   ulong quic_footprint = fd_quic_footprint( &quic_limits );
   FD_TEST( quic_footprint );
@@ -166,7 +166,7 @@ txn_cmd_fn( args_t *         args,
   /* Signer */
   fd_rng_t _rng[1]; fd_rng_t * rng = fd_rng_join( fd_rng_new( _rng, 0U, 0UL ) );
   fd_tls_test_sign_ctx_t * sign_ctx = fd_wksp_alloc_laddr( wksp, alignof(fd_tls_test_sign_ctx_t), sizeof(fd_tls_test_sign_ctx_t), 1UL );
-  *sign_ctx = fd_tls_test_sign_ctx( rng );
+  fd_tls_test_sign_ctx( sign_ctx, rng );
 
   fd_memcpy( quic->config.identity_public_key, sign_ctx->public_key, 32UL );
   quic->config.sign_ctx = sign_ctx;
@@ -178,7 +178,6 @@ txn_cmd_fn( args_t *         args,
 
   fd_quic_config_t * client_cfg = &quic->config;
   client_cfg->role = FD_QUIC_ROLE_CLIENT;
-  memcpy( client_cfg->link.dst_mac_addr, config->tiles.net.mac_addr, 6UL );
   client_cfg->net.ip_addr           = udpsock->listen_ip;
   client_cfg->net.ephem_udp_port.lo = (ushort)udpsock->listen_port;
   client_cfg->net.ephem_udp_port.hi = (ushort)(udpsock->listen_port + 1);

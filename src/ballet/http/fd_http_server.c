@@ -664,7 +664,6 @@ again:
     len_bytes = 9UL;
   } else {
     FD_LOG_ERR(( "unexpected payload_len %lu", payload_len )); /* Silence clang sanitizer, not possible */
-    return;
   }
 
   ulong header_len = 1UL+len_bytes+4UL;
@@ -883,8 +882,7 @@ write_conn_http( fd_http_server_t * http,
       }
       break;
     default:
-      FD_LOG_ERR(( "invalid server state" ));
-      return;
+      FD_LOG_ERR(( "invalid server state (%d)", conn->state ));
   }
 
   long sz = send( http->pollfds[ conn_idx ].fd, response+conn->response_bytes_written, response_len-conn->response_bytes_written, MSG_NOSIGNAL );
@@ -1176,7 +1174,7 @@ fd_http_server_poll( fd_http_server_t * http ) {
   return 1;
 }
 
-void
+static void
 fd_http_server_evict_until( fd_http_server_t * http,
                             ulong              off ) {
   conn_treap_fwd_iter_t next;

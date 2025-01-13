@@ -29,6 +29,7 @@
 #include "../sysvar/fd_sysvar_clock.h"
 #include "../../../ballet/pack/fd_pack.h"
 #include "fd_vm_test.h"
+#include "../../vm/test_vm_util.h"
 
 #pragma GCC diagnostic ignored "-Wformat-extra-args"
 
@@ -74,9 +75,9 @@ fd_exec_instr_test_runner_align( void ) {
 ulong
 fd_exec_instr_test_runner_footprint( void ) {
   ulong l = FD_LAYOUT_INIT;
-  l = FD_LAYOUT_APPEND( l, alignof(fd_exec_instr_test_runner_t), sizeof(fd_exec_instr_test_runner_t) );
-  l = FD_LAYOUT_APPEND( l, fd_funk_align(),                      fd_funk_footprint()                 );
-  return l;
+  l = FD_LAYOUT_APPEND( l, fd_exec_instr_test_runner_align(), sizeof(fd_exec_instr_test_runner_t) );
+  l = FD_LAYOUT_APPEND( l, fd_funk_align(),                   fd_funk_footprint()                 );
+  return FD_LAYOUT_FINI( l, fd_exec_instr_test_runner_align() );
 }
 
 fd_exec_instr_test_runner_t *
@@ -84,9 +85,9 @@ fd_exec_instr_test_runner_new( void * mem,
                                void * spad_mem,
                                ulong  wksp_tag ) {
   FD_SCRATCH_ALLOC_INIT( l, mem );
-  void * runner_mem = FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_exec_instr_test_runner_t), sizeof(fd_exec_instr_test_runner_t) );
-  void * funk_mem   = FD_SCRATCH_ALLOC_APPEND( l, fd_funk_align(),                      fd_funk_footprint()                 );
-  FD_SCRATCH_ALLOC_FINI( l, alignof(fd_exec_instr_test_runner_t) );
+  void * runner_mem = FD_SCRATCH_ALLOC_APPEND( l, fd_exec_instr_test_runner_align(), sizeof(fd_exec_instr_test_runner_t) );
+  void * funk_mem   = FD_SCRATCH_ALLOC_APPEND( l, fd_funk_align(),                   fd_funk_footprint()                 );
+  FD_SCRATCH_ALLOC_FINI( l, fd_exec_instr_test_runner_align() );
 
   ulong txn_max = 4+fd_tile_cnt();
   ulong rec_max = 1024UL;
@@ -100,7 +101,8 @@ fd_exec_instr_test_runner_new( void * mem,
   runner->funk = funk;
 
   /* Create spad */
-  runner->spad = fd_spad_join( fd_spad_new( spad_mem, fd_ulong_align_up( 128UL * FD_ACC_TOT_SZ_MAX, FD_SPAD_ALIGN ) ) );
+  runner->spad = fd_spad_join( fd_spad_new( spad_mem, FD_RUNTIME_TRANSACTION_EXECUTION_FOOTPRINT_FUZZ ) );
+  fd_spad_push_debug( runner->spad );
   return runner;
 }
 
@@ -109,8 +111,20 @@ fd_exec_instr_test_runner_delete( fd_exec_instr_test_runner_t * runner ) {
   if( FD_UNLIKELY( !runner ) ) return NULL;
   fd_funk_delete( fd_funk_leave( runner->funk ) );
   runner->funk = NULL;
+  if( FD_UNLIKELY( fd_spad_verify( runner->spad ) ) ) {
+    FD_LOG_ERR(( "fd_spad_verify() failed" ));
+  }
+  fd_spad_pop_debug( runner->spad );
+  if( FD_UNLIKELY( fd_spad_frame_used( runner->spad )!=0 ) ) {
+    FD_LOG_ERR(( "stray spad frame frame_used=%lu", fd_spad_frame_used( runner->spad ) ));
+  }
   runner->spad = NULL;
   return runner;
+}
+
+fd_spad_t *
+fd_exec_instr_test_runner_get_spad( fd_exec_instr_test_runner_t * runner ) {
+  return runner->spad;
 }
 
 static int
@@ -190,7 +204,7 @@ _load_txn_account( fd_borrowed_account_t *           acc,
   return _load_account( acc, acc_mgr, funk_txn, &account_state_to_save );
 }
 
-int
+static int
 _restore_feature_flags( fd_exec_epoch_ctx_t *              epoch_ctx,
                         fd_exec_test_feature_set_t const * feature_set ) {
   fd_features_disable_all( &epoch_ctx->features );
@@ -211,7 +225,6 @@ int
 fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
                                    fd_exec_instr_ctx_t *                ctx,
                                    fd_exec_test_instr_context_t const * test_ctx,
-                                   fd_alloc_t *                         alloc,
                                    bool                                 is_syscall ) {
   memset( ctx, 0, sizeof(fd_exec_instr_ctx_t) );
 
@@ -229,7 +242,7 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
   fd_funk_end_write( funk );
   fd_scratch_push();
 
-  ulong vote_acct_max = 128UL;
+  ulong vote_acct_max = MAX_TX_ACCOUNT_LOCKS;
 
   /* Allocate contexts */
   uchar *               epoch_ctx_mem = fd_scratch_alloc( fd_exec_epoch_ctx_align(), fd_exec_epoch_ctx_footprint( vote_acct_max ) );
@@ -237,7 +250,7 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
   uchar *               txn_ctx_mem   = fd_scratch_alloc( FD_EXEC_TXN_CTX_ALIGN,   FD_EXEC_TXN_CTX_FOOTPRINT   );
 
   fd_exec_epoch_ctx_t * epoch_ctx     = fd_exec_epoch_ctx_join( fd_exec_epoch_ctx_new( epoch_ctx_mem, vote_acct_max ) );
-  fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_alloc_virtual( alloc ) ) );
+  fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_spad_virtual( runner->spad ) ) );
   fd_exec_txn_ctx_t *   txn_ctx       = fd_exec_txn_ctx_join  ( fd_exec_txn_ctx_new  ( txn_ctx_mem   ) );
 
   assert( epoch_ctx );
@@ -245,11 +258,6 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
 
   ctx->slot_ctx   = slot_ctx;
   ctx->txn_ctx    = txn_ctx;
-  txn_ctx->valloc = slot_ctx->valloc;
-
-  /* Initial variables */
-  txn_ctx->loaded_accounts_data_size_limit = FD_VM_LOADED_ACCOUNTS_DATA_SIZE_LIMIT;
-  txn_ctx->heap_size                       = FD_VM_HEAP_DEFAULT;
 
   /* Set up epoch context. Defaults obtained from GenesisConfig::Default() */
   fd_epoch_bank_t * epoch_bank = fd_exec_epoch_ctx_epoch_bank( epoch_ctx );
@@ -284,35 +292,13 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
   fd_memset( recent_block_hash, 0, sizeof(fd_block_block_hash_entry_t) );
 
   /* Set up txn context */
+  fd_exec_txn_ctx_from_exec_slot_ctx( slot_ctx, txn_ctx );
+  fd_exec_txn_ctx_setup_basic( txn_ctx );
 
-  txn_ctx->epoch_ctx               = epoch_ctx;
-  txn_ctx->slot_ctx                = slot_ctx;
   txn_ctx->funk_txn                = funk_txn;
-  txn_ctx->acc_mgr                 = acc_mgr;
   txn_ctx->compute_unit_limit      = test_ctx->cu_avail;
-  txn_ctx->compute_unit_price      = 0;
   txn_ctx->compute_meter           = test_ctx->cu_avail;
-  txn_ctx->prioritization_fee_type = FD_COMPUTE_BUDGET_PRIORITIZATION_FEE_TYPE_DEPRECATED;
-  txn_ctx->custom_err              = UINT_MAX;
-  txn_ctx->instr_stack_sz          = 0;
-  txn_ctx->executable_cnt          = 0;
-  txn_ctx->paid_fees               = 0;
-  txn_ctx->num_instructions        = 0;
-  txn_ctx->dirty_vote_acc          = 0;
-  txn_ctx->dirty_stake_acc         = 0;
-  txn_ctx->failed_instr            = NULL;
-  txn_ctx->instr_err_idx           = INT_MAX;
-  txn_ctx->capture_ctx             = NULL;
   txn_ctx->vote_accounts_pool      = NULL;
-  txn_ctx->accounts_resize_delta   = 0;
-  txn_ctx->instr_info_cnt          = 0;
-  txn_ctx->instr_trace_length      = 0;
-  txn_ctx->exec_err                = 0;
-  txn_ctx->exec_err_kind           = FD_EXECUTOR_ERR_KIND_EBPF;
-
-  memset( txn_ctx->_txn_raw, 0, sizeof(fd_rawtxn_b_t) );
-  memset( txn_ctx->return_data.program_id.key, 0, sizeof(fd_pubkey_t) );
-  txn_ctx->return_data.len         = 0;
   txn_ctx->spad                    = runner->spad;
 
   /* Set up instruction context */
@@ -330,43 +316,27 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
 
   /* Prepare borrowed account table (correctly handles aliasing) */
 
-  if( FD_UNLIKELY( test_ctx->accounts_count > 128 ) ) {
-    /* TODO remove this hardcoded constant */
+  if( FD_UNLIKELY( test_ctx->accounts_count > MAX_TX_ACCOUNT_LOCKS ) ) {
     REPORT( NOTICE, "too many accounts" );
     return 0;
   }
 
-  fd_borrowed_account_t * borrowed_accts = txn_ctx->borrowed_accounts;
-  fd_memset( borrowed_accts, 0, test_ctx->accounts_count * sizeof(fd_borrowed_account_t) );
-  txn_ctx->accounts_cnt = test_ctx->accounts_count;
-  for ( uint i = 0; i < test_ctx->accounts_count; i++ ) {
-    memcpy( &(txn_ctx->accounts[i]), test_ctx->accounts[i].address, sizeof(fd_pubkey_t) );
-  }
-  fd_txn_t * txn_descriptor = (fd_txn_t *) fd_scratch_alloc( fd_txn_align(), fd_txn_footprint(1, 0) );
-  fd_memset(txn_descriptor, 0, fd_txn_footprint(1, 0) );
-  txn_descriptor->acct_addr_cnt = (ushort) test_ctx->accounts_count;
-  txn_descriptor->addr_table_adtl_cnt = 0;
-  txn_ctx->txn_descriptor = txn_descriptor;
-
-  /* Precompiles are allowed to read data from all instructions.
-     We need to at least set pointers to the current instruction.
-     Note: for simplicity we point the entire raw tx data to the
-     instruction data, this is probably something we can improve. */
-  txn_descriptor->instr_cnt = 1;
-  txn_ctx->_txn_raw->raw = info->data;
-  txn_descriptor->instr[0].data_off = 0;
-  txn_descriptor->instr[0].data_sz = info->data_sz;
-
   /* Load accounts into database */
 
   assert( acc_mgr->funk );
+
+  fd_borrowed_account_t * borrowed_accts = txn_ctx->borrowed_accounts;
+  fd_memset( borrowed_accts, 0, test_ctx->accounts_count * sizeof(fd_borrowed_account_t) );
+  txn_ctx->accounts_cnt = test_ctx->accounts_count;
+
   for( ulong j=0UL; j < test_ctx->accounts_count; j++ ) {
+    memcpy(  &(txn_ctx->accounts[j]), test_ctx->accounts[j].address, sizeof(fd_pubkey_t) );
     if( !_load_account( &borrowed_accts[j], acc_mgr, funk_txn, &test_ctx->accounts[j] ) ) {
       return 0;
     }
 
     if( borrowed_accts[j].const_meta ) {
-      uchar * data = fd_spad_alloc( txn_ctx->spad, FD_SPAD_ALIGN, FD_ACC_TOT_SZ_MAX );
+      uchar * data = fd_spad_alloc_debug( txn_ctx->spad, FD_ACCOUNT_REC_ALIGN, FD_ACC_TOT_SZ_MAX );
       ulong   dlen = borrowed_accts[j].const_meta->dlen;
       fd_memcpy( data, borrowed_accts[j].const_meta, sizeof(fd_account_meta_t)+dlen );
       borrowed_accts[j].const_meta = (fd_account_meta_t*)data;
@@ -482,17 +452,9 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
 
   /* Handle undefined behavior if sysvars are malicious (!!!) */
 
-  /* A NaN rent exemption threshold is U.B. in Solana Labs */
+  /* Override epoch bank rent setting */
   fd_rent_t const * rent = fd_sysvar_cache_rent( slot_ctx->sysvar_cache );
   if( rent ) {
-    if( ( !fd_double_is_normal( rent->exemption_threshold ) ) |
-        ( rent->exemption_threshold     <      0.0 ) |
-        ( rent->exemption_threshold     >    999.0 ) |
-        ( rent->lamports_per_uint8_year > UINT_MAX ) |
-        ( rent->burn_percent            >      100 ) )
-      return 0;
-
-    /* Override epoch bank settings */
     epoch_bank->rent = *rent;
   }
 
@@ -509,8 +471,7 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
 
   /* Load instruction accounts */
 
-  if( FD_UNLIKELY( test_ctx->instr_accounts_count > 128 ) ) {
-    /* TODO remove this hardcoded constant */
+  if( FD_UNLIKELY( test_ctx->instr_accounts_count > MAX_TX_ACCOUNT_LOCKS ) ) {
     REPORT( NOTICE, "too many instruction accounts" );
     return 0;
   }
@@ -549,8 +510,7 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
   //  FIXME: Specifically for CPI syscalls, flag guard this?
   fd_instr_info_sum_account_lamports( info, &info->starting_lamports_h, &info->starting_lamports_l );
 
-  /* The remaining checks enforce that the program is one of the accounts and
-    owned by native loader. */
+  /* The remaining checks enforce that the program is in the accounts list. */
   bool found_program_id = false;
   for( uint i = 0; i < test_ctx->accounts_count; i++ ) {
     if( 0 == memcmp( test_ctx->accounts[i].address, test_ctx->program_id, sizeof(fd_pubkey_t) ) ) {
@@ -560,7 +520,7 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
     }
   }
 
-  /* Aborting is only important for instr execution */
+  /* Early returning only happens in instruction execution. */
   if( !is_syscall && !found_program_id ) {
     FD_LOG_NOTICE(( " Unable to find program_id in accounts" ));
     return 0;
@@ -569,7 +529,6 @@ fd_exec_test_instr_context_create( fd_exec_instr_test_runner_t *        runner,
   ctx->epoch_ctx = epoch_ctx;
   ctx->funk_txn  = funk_txn;
   ctx->acc_mgr   = acc_mgr;
-  ctx->valloc    = fd_scratch_virtual();
   ctx->instr     = info;
 
   fd_log_collector_init( &ctx->txn_ctx->log_collector, 1 );
@@ -612,7 +571,7 @@ _txn_context_create_and_exec( fd_exec_instr_test_runner_t *      runner,
   fd_funk_txn_t * funk_txn = fd_funk_txn_prepare( funk, NULL, xid, 1 );
   fd_funk_end_write( runner->funk );
 
-  ulong vote_acct_max = 128UL;
+  ulong vote_acct_max = MAX_TX_ACCOUNT_LOCKS;
 
   /* Allocate contexts */
   uchar *               epoch_ctx_mem = fd_scratch_alloc( fd_exec_epoch_ctx_align(), fd_exec_epoch_ctx_footprint( vote_acct_max ) );
@@ -652,11 +611,11 @@ _txn_context_create_and_exec( fd_exec_instr_test_runner_t *      runner,
   /* Load account states into funk (note this is different from the account keys):
     Account state = accounts to populate Funk
     Account keys = account keys that the transaction needs */
-  for( ulong i = 0; i < test_ctx->tx.message.account_shared_data_count; i++ ) {
+  for( ulong i = 0; i < test_ctx->account_shared_data_count; i++ ) {
     /* Load the accounts into the account manager
        Borrowed accounts get reset anyways - we just need to load the account somewhere */
     FD_BORROWED_ACCOUNT_DECL(acc);
-    _load_txn_account( acc, acc_mgr, funk_txn, &test_ctx->tx.message.account_shared_data[i] );
+    _load_txn_account( acc, acc_mgr, funk_txn, &test_ctx->account_shared_data[i] );
   }
 
   /* Restore sysvar cache */
@@ -709,7 +668,7 @@ _txn_context_create_and_exec( fd_exec_instr_test_runner_t *      runner,
     epoch_bank->rent = *slot_ctx->sysvar_cache->val_rent;
   }
 
-  /* Provde default slot hashes of size 1 if not provided */
+  /* Provide default slot hashes of size 1 if not provided */
   if( !slot_ctx->sysvar_cache->has_slot_hashes ) {
     fd_slot_hash_t * slot_hashes = deq_fd_slot_hash_t_alloc( fd_scratch_virtual(), 1 );
     fd_slot_hash_t * dummy_elem = deq_fd_slot_hash_t_push_tail_nocopy( slot_hashes );
@@ -968,22 +927,12 @@ _txn_context_create_and_exec( fd_exec_instr_test_runner_t *      runner,
 
 void
 fd_exec_test_instr_context_destroy( fd_exec_instr_test_runner_t * runner,
-                                    fd_exec_instr_ctx_t *         ctx,
-                                    fd_wksp_t *                   wksp,
-                                    fd_alloc_t *                  alloc ) {
+                                    fd_exec_instr_ctx_t *         ctx ) {
   if( !ctx ) return;
   fd_exec_slot_ctx_t *  slot_ctx  = (fd_exec_slot_ctx_t *)ctx->slot_ctx;
   if( !slot_ctx ) return;
   fd_acc_mgr_t *        acc_mgr   = slot_ctx->acc_mgr;
   fd_funk_txn_t *       funk_txn  = slot_ctx->funk_txn;
-
-  // Free alloc
-  if( alloc ) {
-    fd_wksp_free_laddr( fd_alloc_delete( fd_alloc_leave( alloc ) ) );
-  }
-
-  // Detach from workspace
-  fd_wksp_detach( wksp );
 
   fd_exec_slot_ctx_free( slot_ctx );
   fd_acc_mgr_delete( acc_mgr );
@@ -998,20 +947,10 @@ fd_exec_test_instr_context_destroy( fd_exec_instr_test_runner_t * runner,
 
 static void
 _txn_context_destroy( fd_exec_instr_test_runner_t * runner,
-                      fd_exec_slot_ctx_t *          slot_ctx,
-                      fd_wksp_t *                   wksp,
-                      fd_alloc_t *                  alloc ) {
+                      fd_exec_slot_ctx_t *          slot_ctx ) {
   if( !slot_ctx ) return; // This shouldn't be false either
   fd_acc_mgr_t *        acc_mgr   = slot_ctx->acc_mgr;
   fd_funk_txn_t *       funk_txn  = slot_ctx->funk_txn;
-
-  // Free alloc
-  if( alloc ) {
-    fd_wksp_free_laddr( fd_alloc_delete( fd_alloc_leave( alloc ) ) );
-  }
-
-  // Detach from workspace
-  fd_wksp_detach( wksp );
 
   fd_exec_slot_ctx_free( slot_ctx );
   fd_acc_mgr_delete( acc_mgr );
@@ -1019,225 +958,6 @@ _txn_context_destroy( fd_exec_instr_test_runner_t * runner,
   fd_funk_start_write( runner->funk );
   fd_funk_txn_cancel( runner->funk, funk_txn, 1 );
   fd_funk_end_write( runner->funk );
-}
-
-/* fd_exec_instr_fixture_diff_t compares a test fixture against the
-   actual execution results. */
-
-struct fd_exec_instr_fixture_diff {
-  fd_exec_instr_ctx_t *                ctx;
-  fd_exec_test_instr_context_t const * input;
-  fd_exec_test_instr_effects_t const * expected;
-  int                                  exec_result;
-
-  int has_diff;
-};
-
-typedef struct fd_exec_instr_fixture_diff fd_exec_instr_fixture_diff_t;
-
-static int
-_diff_acct( fd_exec_test_acct_state_t const * want,
-            fd_borrowed_account_t const *     have ) {
-
-  int diff = 0;
-
-  assert( 0==memcmp( want->address, have->pubkey->uc, sizeof(fd_pubkey_t) ) );
-
-  if( want->lamports != have->meta->info.lamports ) {
-    REPORT_ACCTV( NOTICE, want->address, "expected %lu lamports, got %lu",
-                  want->lamports, have->meta->info.lamports );
-    diff = 1;
-  }
-
-  if( !want->data && have->meta->dlen > 0 ) {
-    REPORT_ACCTV( NOTICE, want->address, "expected no data, but got %lu bytes",
-                  have->meta->dlen );
-    diff = 1;
-  }
-
-  if( want->data && want->data->size != have->meta->dlen ) {
-    REPORT_ACCTV( NOTICE, want->address, "expected data sz %u, got %lu",
-                  want->data->size, have->meta->dlen );
-    diff = 1;
-  }
-
-  if( want->executable != have->meta->info.executable ) {
-    REPORT_ACCTV( NOTICE, want->address, "expected account to be %s, but is %s",
-                  (want->executable           ) ? "executable" : "not executable",
-                  (have->meta->info.executable) ? "executable" : "not executable" );
-    diff = 1;
-  }
-
-  if( want->rent_epoch != have->meta->info.rent_epoch ) {
-    REPORT_ACCTV( NOTICE, want->address, "expected rent epoch %lu, got %lu",
-                  want->rent_epoch, have->meta->info.rent_epoch );
-    diff = 1;
-  }
-
-  if( 0!=memcmp( want->owner, have->meta->info.owner, sizeof(fd_pubkey_t) ) ) {
-    char a[ FD_BASE58_ENCODED_32_SZ ];
-    char b[ FD_BASE58_ENCODED_32_SZ ];
-    REPORT_ACCTV( NOTICE, want->address, "expected owner %s, got %s",
-                  fd_acct_addr_cstr( a, want->owner            ),
-                  fd_acct_addr_cstr( b, have->meta->info.owner ) );
-    diff = 1;
-  }
-
-  if( want->data && 0!=memcmp( want->data->bytes, have->data, want->data->size ) ) {
-    REPORT_ACCT( NOTICE, want->address, "data mismatch" );
-    diff = 1;
-  }
-
-  return diff;
-}
-
-static void
-_unexpected_acct_modify_in_fixture( fd_exec_instr_fixture_diff_t * check,
-                                    void const *                   pubkey ) {
-
-  /* At this point, an account was reported as modified in the test
-     fixture, but no changes were seen locally. */
-
-  check->has_diff = 1;
-
-  REPORT_ACCT( NOTICE, pubkey, "expected changes, but none found" );
-}
-
-static void
-_unexpected_acct_modify_locally( fd_exec_instr_fixture_diff_t * check,
-                                 fd_borrowed_account_t const *  have ) {
-
-  /* At this point, an account was reported as modified locally, but no
-     changes contained in fixture.  Thus, diff against the original
-     state in the fixture. */
-
-  /* Find matching test input */
-
-  fd_exec_test_instr_context_t const * input = check->input;
-
-  fd_exec_test_acct_state_t * want = NULL;
-  for( ulong i=0UL; i < input->accounts_count; i++ ) {
-    fd_exec_test_acct_state_t * acct_state = &input->accounts[i];
-    if( 0==memcmp( acct_state->address, have->pubkey, sizeof(fd_pubkey_t) ) ) {
-      want = acct_state;
-      break;
-    }
-  }
-  if( FD_UNLIKELY( !want ) ) {
-    check->has_diff = 1;
-
-    REPORT_ACCT( NOTICE, have->pubkey, "found unexpected changes" );
-    /* TODO: dump the account that changed unexpectedly */
-    return;
-  }
-
-  /* Compare against original state */
-
-  check->has_diff |= _diff_acct( want, have );
-}
-
-static void
-_diff_effects( fd_exec_instr_fixture_diff_t * check ) {
-
-  fd_exec_instr_ctx_t *                ctx         = check->ctx;
-  fd_exec_test_instr_effects_t const * expected    = check->expected;
-  int                                  exec_result = check->exec_result;
-
-  if( expected->result != exec_result ) {
-    check->has_diff = 1;
-    REPORTV( NOTICE, " expected result (%d-%s), got (%d-%s)",
-             expected->result, fd_executor_instr_strerror( -expected->result ),
-             exec_result,      fd_executor_instr_strerror( -exec_result      ) );
-
-    if( ( expected->result == FD_EXECUTOR_INSTR_SUCCESS ) |
-        ( exec_result      == FD_EXECUTOR_INSTR_SUCCESS ) ) {
-      /* If one (and only one) of the results is success, stop diffing
-         for sake of brevity. */
-      return;
-    }
-  }
-  else if( ( exec_result==FD_EXECUTOR_INSTR_ERR_CUSTOM_ERR    ) &
-           ( expected->custom_err != ctx->txn_ctx->custom_err ) ) {
-    check->has_diff = 1;
-    REPORTV( NOTICE, " expected custom error %u, got %u",
-             expected->custom_err, ctx->txn_ctx->custom_err );
-    return;
-  }
-
-  /* Sort the transaction's write-locked accounts */
-
-  void const ** modified_pubkeys =
-      fd_scratch_alloc( alignof(void *), ctx->txn_ctx->accounts_cnt * sizeof(void *) );
-  ulong modified_acct_cnt = 0UL;
-
-  for( ulong i=0UL; i < ctx->txn_ctx->accounts_cnt; i++ ) {
-    fd_borrowed_account_t * acc = &ctx->txn_ctx->borrowed_accounts[i];
-    if( acc->meta )  /* instruction took a writable handle? */
-      modified_pubkeys[ modified_acct_cnt++ ] = &acc->pubkey->uc;
-  }
-
-  sort_pubkey_p_inplace( modified_pubkeys, modified_acct_cnt );
-
-  /* Bitmask of which transaction accounts we've visited */
-
-  ulong   visited_sz = fd_ulong_align_up( modified_acct_cnt, 64UL )>>3;
-  ulong * visited    = fd_scratch_alloc( alignof(ulong), visited_sz );
-  fd_memset( visited, 0, visited_sz );
-
-  /* Verify each of the expected accounts */
-
-  for( ulong i=0UL; i < expected->modified_accounts_count; i++ ) {
-    fd_exec_test_acct_state_t const * want = &expected->modified_accounts[i];
-
-    void const * query = want->address;
-    ulong idx = sort_pubkey_p_search_geq( modified_pubkeys, modified_acct_cnt, query );
-    if( FD_UNLIKELY( idx >= modified_acct_cnt ) ) {
-      _unexpected_acct_modify_in_fixture( check, query );
-      continue;
-    }
-
-    if( FD_UNLIKELY( 0!=memcmp( modified_pubkeys[idx], query, sizeof(fd_pubkey_t) ) ) ) {
-      _unexpected_acct_modify_in_fixture( check, query );
-      continue;
-    }
-
-    visited[ idx>>6 ] |= fd_ulong_mask_bit( idx&63UL );
-
-    ulong acct_laddr = ( (ulong)modified_pubkeys[idx] - offsetof( fd_borrowed_account_t, pubkey ) );
-    fd_borrowed_account_t const * acct = (fd_borrowed_account_t const *)acct_laddr;
-
-    check->has_diff |= _diff_acct( want, acct );
-  }
-
-  /* Visit accounts that were write-locked locally, but are not in
-     expected list */
-
-  for( ulong i=0UL; i < modified_acct_cnt; i++ ) {
-    ulong acct_laddr = ( (ulong)modified_pubkeys[i] - offsetof( fd_borrowed_account_t, pubkey ) );
-    fd_borrowed_account_t const * acct = (fd_borrowed_account_t const *)acct_laddr;
-
-    int was_visited = !!( visited[ i>>6 ] & fd_ulong_mask_bit( i&63UL ) );
-    if( FD_UNLIKELY( !was_visited ) )
-      _unexpected_acct_modify_locally( check, acct );
-  }
-
-  /* Check return data */
-  ulong data_sz = expected->return_data ? expected->return_data->size : 0UL; /* support expected->return_data==NULL */
-  if (data_sz != ctx->txn_ctx->return_data.len) {
-    check->has_diff = 1;
-    REPORTV( WARNING, " expected return data size %lu, got %lu",
-             (ulong) data_sz, ctx->txn_ctx->return_data.len );
-  }
-  else if (data_sz > 0 ) {
-    if( memcmp( expected->return_data->bytes, ctx->txn_ctx->return_data.data, expected->return_data->size ) ) {
-      check->has_diff = 1;
-      REPORT( WARNING, " return data mismatch" );
-    }
-  }
-
-  /* TODO: Capture account side effects outside of the access list by
-           looking at the funk record delta (technically a scheduling
-           violation) */
 }
 
 static fd_sbpf_syscalls_t *
@@ -1259,45 +979,6 @@ lookup_syscall_func( fd_sbpf_syscalls_t *syscalls,
   return NULL;
 }
 
-int
-fd_exec_instr_fixture_run( fd_exec_instr_test_runner_t *        runner,
-                           fd_exec_test_instr_fixture_t const * test,
-                           char const *                         log_name ) {
-  fd_wksp_t *  wksp  = fd_wksp_attach( "wksp" );
-  fd_alloc_t * alloc = fd_alloc_join( fd_alloc_new( fd_wksp_alloc_laddr( wksp, fd_alloc_align(), fd_alloc_footprint(), 2 ), 2 ), 0 );
-  fd_exec_instr_ctx_t ctx[1];
-  if( FD_UNLIKELY( !fd_exec_test_instr_context_create( runner, ctx, &test->input, alloc, false ) ) ) {
-    fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
-    return 0;
-  }
-
-  fd_instr_info_t * instr = (fd_instr_info_t *) ctx->instr;
-
-  /* Execute the test */
-  int exec_result = fd_execute_instr(ctx->txn_ctx, instr);
-
-  int has_diff;
-  do {
-    /* Compare local execution results against fixture */
-
-    fd_cstr_printf( _report_prefix, sizeof(_report_prefix), NULL, "%s: ", log_name );
-
-    fd_exec_instr_fixture_diff_t diff =
-      { .ctx         = ctx,
-        .input       = &test->input,
-        .expected    = &test->output,
-        .exec_result = -exec_result };
-    _diff_effects( &diff );
-
-    _report_prefix[0] = '\0';
-
-    has_diff = diff.has_diff;
-  } while(0);
-
-  fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
-  return !has_diff;
-}
-
 ulong
 fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
                         void const *                  input_,
@@ -1306,13 +987,11 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
                         ulong                         output_bufsz ) {
   fd_exec_test_instr_context_t const * input  = fd_type_pun_const( input_ );
   fd_exec_test_instr_effects_t **      output = fd_type_pun( output_ );
-  fd_wksp_t *  wksp  = fd_wksp_attach( "wksp" );
-  fd_alloc_t * alloc = fd_alloc_join( fd_alloc_new( fd_wksp_alloc_laddr( wksp, fd_alloc_align(), fd_alloc_footprint(), 2 ), 2 ), 0 );
 
   /* Convert the Protobuf inputs to a fd_exec context */
   fd_exec_instr_ctx_t ctx[1];
-  if( !fd_exec_test_instr_context_create( runner, ctx, input, alloc, false ) ) {
-    fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+  if( !fd_exec_test_instr_context_create( runner, ctx, input, false ) ) {
+    fd_exec_test_instr_context_destroy( runner, ctx );
     return 0UL;
   }
 
@@ -1330,7 +1009,7 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
     FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_exec_test_instr_effects_t),
                                 sizeof (fd_exec_test_instr_effects_t) );
   if( FD_UNLIKELY( _l > output_end ) ) {
-    fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+    fd_exec_test_instr_context_destroy( runner, ctx );
     return 0UL;
   }
   fd_memset( effects, 0, sizeof(fd_exec_test_instr_effects_t) );
@@ -1351,7 +1030,7 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
     FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_exec_test_acct_state_t),
                                 sizeof (fd_exec_test_acct_state_t) * modified_acct_cnt );
   if( FD_UNLIKELY( _l > output_end ) ) {
-    fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+    fd_exec_test_instr_context_destroy( runner, ctx );
     return 0;
   }
   effects->modified_accounts       = modified_accts;
@@ -1361,7 +1040,9 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
 
   for( ulong j=0UL; j < ctx->txn_ctx->accounts_cnt; j++ ) {
     fd_borrowed_account_t * acc = &ctx->txn_ctx->borrowed_accounts[j];
-    if( !acc->meta ) continue;
+    if( !acc->const_meta ) {
+      continue;
+    }
 
     ulong modified_idx = effects->modified_accounts_count;
     assert( modified_idx < modified_acct_cnt );
@@ -1372,15 +1053,17 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
 
     memcpy( out_acct->address, acc->pubkey, sizeof(fd_pubkey_t) );
     out_acct->lamports     = acc->const_meta->info.lamports;
-    out_acct->data =
-      FD_SCRATCH_ALLOC_APPEND( l, alignof(pb_bytes_array_t),
-                                  PB_BYTES_ARRAY_T_ALLOCSIZE( acc->const_meta->dlen ) );
-    if( FD_UNLIKELY( _l > output_end ) ) {
-      fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
-      return 0UL;
+    if( acc->const_meta->dlen>0UL ) {
+      out_acct->data =
+        FD_SCRATCH_ALLOC_APPEND( l, alignof(pb_bytes_array_t),
+                                    PB_BYTES_ARRAY_T_ALLOCSIZE( acc->const_meta->dlen ) );
+      if( FD_UNLIKELY( _l > output_end ) ) {
+        fd_exec_test_instr_context_destroy( runner, ctx );
+        return 0UL;
+      }
+      out_acct->data->size = (pb_size_t)acc->const_meta->dlen;
+      fd_memcpy( out_acct->data->bytes, acc->const_data, acc->const_meta->dlen );
     }
-    out_acct->data->size = (pb_size_t)acc->const_meta->dlen;
-    fd_memcpy( out_acct->data->bytes, acc->const_data, acc->const_meta->dlen );
 
     out_acct->executable     = acc->const_meta->info.executable;
     out_acct->rent_epoch     = acc->const_meta->info.rent_epoch;
@@ -1391,17 +1074,19 @@ fd_exec_instr_test_run( fd_exec_instr_test_runner_t * runner,
 
   /* Capture return data */
   fd_txn_return_data_t * return_data = &ctx->txn_ctx->return_data;
-  effects->return_data = FD_SCRATCH_ALLOC_APPEND(l, alignof(pb_bytes_array_t),
-                              PB_BYTES_ARRAY_T_ALLOCSIZE( return_data->len ) );
-  if( FD_UNLIKELY( _l > output_end ) ) {
-    fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
-    return 0UL;
+  if( return_data->len>0UL ) {
+    effects->return_data = FD_SCRATCH_ALLOC_APPEND(l, alignof(pb_bytes_array_t),
+                                PB_BYTES_ARRAY_T_ALLOCSIZE( return_data->len ) );
+    if( FD_UNLIKELY( _l > output_end ) ) {
+      fd_exec_test_instr_context_destroy( runner, ctx );
+      return 0UL;
+    }
+    effects->return_data->size = (pb_size_t)return_data->len;
+    fd_memcpy( effects->return_data->bytes, return_data->data, return_data->len );
   }
-  effects->return_data->size = (pb_size_t)return_data->len;
-  fd_memcpy( effects->return_data->bytes, return_data->data, return_data->len );
 
   ulong actual_end = FD_SCRATCH_ALLOC_FINI( l, 1UL );
-  fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+  fd_exec_test_instr_context_destroy( runner, ctx );
 
   *output = effects;
   return actual_end - (ulong)output_buf;
@@ -1418,15 +1103,13 @@ fd_exec_txn_test_run( fd_exec_instr_test_runner_t * runner, // Runner only conta
 
   FD_SCRATCH_SCOPE_BEGIN {
     /* Initialize memory */
-    fd_wksp_t *           wksp          = fd_wksp_attach( "wksp" );
-    fd_alloc_t *          alloc         = fd_alloc_join( fd_alloc_new( fd_wksp_alloc_laddr( wksp, fd_alloc_align(), fd_alloc_footprint(), 2 ), 2 ), 0 );
     uchar *               slot_ctx_mem  = fd_scratch_alloc( FD_EXEC_SLOT_CTX_ALIGN,  FD_EXEC_SLOT_CTX_FOOTPRINT  );
-    fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_alloc_virtual( alloc ) ) );
+    fd_exec_slot_ctx_t *  slot_ctx      = fd_exec_slot_ctx_join ( fd_exec_slot_ctx_new ( slot_ctx_mem, fd_spad_virtual( runner->spad ) ) );
 
     /* Create and exec transaction */
     fd_execute_txn_task_info_t * task_info = _txn_context_create_and_exec( runner, slot_ctx, input );
     if( task_info == NULL ) {
-      _txn_context_destroy( runner, slot_ctx, wksp, alloc );
+      _txn_context_destroy( runner, slot_ctx );
       return 0UL;
     }
     fd_exec_txn_ctx_t * txn_ctx = task_info->txn_ctx;
@@ -1464,18 +1147,18 @@ fd_exec_txn_test_run( fd_exec_instr_test_runner_t * runner, // Runner only conta
         txn_result->instruction_error = (uint32_t) -task_info->txn_ctx->exec_err;
         txn_result->instruction_error_index = (uint32_t) task_info->txn_ctx->instr_err_idx;
 
-        /* 
-        TODO: precompile error codes are not conformant, so we're ignoring custom error codes for them for now. This should be revisited in the future. 
+        /*
+        TODO: precompile error codes are not conformant, so we're ignoring custom error codes for them for now. This should be revisited in the future.
         For now, only precompiles throw custom error codes, so we can ignore all custom error codes thrown in the sanitization phase. If this changes,
         this logic will have to be revisited.
 
         if( task_info->txn_ctx->exec_err == FD_EXECUTOR_INSTR_ERR_CUSTOM_ERR ) {
           txn_result->custom_error = txn_ctx->custom_err;
-        } 
+        }
         */
       }
       ulong actual_end = FD_SCRATCH_ALLOC_FINI( l, 1UL );
-      _txn_context_destroy( runner, slot_ctx, wksp, alloc );
+      _txn_context_destroy( runner, slot_ctx );
 
       *output = txn_result;
       return actual_end - (ulong)output_buf;
@@ -1528,7 +1211,8 @@ fd_exec_txn_test_run( fd_exec_instr_test_runner_t * runner, // Runner only conta
     /* Capture borrowed accounts */
     for( ulong j=0UL; j < txn_ctx->accounts_cnt; j++ ) {
       fd_borrowed_account_t * acc = &txn_ctx->borrowed_accounts[j];
-      if( !acc->meta ) continue;
+      if( !( fd_txn_account_is_writable_idx( txn_ctx, (int)j ) || j==FD_FEE_PAYER_TXN_IDX ) ) continue;
+      assert( acc->meta );
 
       ulong modified_idx = txn_result->resulting_state.acct_states_count;
       assert( modified_idx < modified_acct_cnt );
@@ -1560,7 +1244,7 @@ fd_exec_txn_test_run( fd_exec_instr_test_runner_t * runner, // Runner only conta
     }
 
     ulong actual_end = FD_SCRATCH_ALLOC_FINI( l, 1UL );
-    _txn_context_destroy( runner, slot_ctx, wksp, alloc );
+    _txn_context_destroy( runner, slot_ctx );
 
     *output = txn_result;
     return actual_end - (ulong)output_buf;
@@ -1625,7 +1309,7 @@ fd_sbpf_program_load_test_run( FD_PARAM_UNUSED fd_exec_instr_test_runner_t * run
 
   do{
 
-    if( FD_UNLIKELY( !fd_sbpf_elf_peek( &info, _bin, elf_sz, input->deploy_checks ) ) ) {
+    if( FD_UNLIKELY( !fd_sbpf_elf_peek( &info, _bin, elf_sz, input->deploy_checks, FD_SBPF_V0, FD_SBPF_V3 ) ) ) {
       /* return incomplete effects on execution failures */
       break;
     }
@@ -1694,8 +1378,6 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
                              ulong                         output_bufsz ) {
   fd_exec_test_syscall_context_t const * input =  fd_type_pun_const( input_ );
   fd_exec_test_syscall_effects_t **      output = fd_type_pun( output_ );
-  fd_wksp_t *  wksp  = fd_wksp_attach( "wksp" );
-  fd_alloc_t * alloc = fd_alloc_join( fd_alloc_new( fd_wksp_alloc_laddr( wksp, fd_alloc_align(), fd_alloc_footprint(), 2 ), 2 ), 0 );
 
   /* Create execution context */
   const fd_exec_test_instr_context_t * input_instr_ctx = &input->instr_ctx;
@@ -1704,9 +1386,25 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
   int is_cpi            = !strncmp( (const char *)input->syscall_invocation.function_name.bytes, "sol_invoke_signed", 17 );
   int skip_extra_checks = !is_cpi;
 
-  if( !fd_exec_test_instr_context_create( runner, ctx, input_instr_ctx, alloc, skip_extra_checks ) )
+  if( !fd_exec_test_instr_context_create( runner, ctx, input_instr_ctx, skip_extra_checks ) )
     goto error;
   fd_valloc_t valloc = fd_scratch_virtual();
+  fd_spad_t * spad = fd_exec_instr_test_runner_get_spad( runner );
+
+  if (is_cpi) {
+    ctx->txn_ctx->instr_info_cnt = 1;
+
+    /* Need to setup txn_descriptor for txn account write checks (see fd_txn_account_is_writable_idx)
+       FIXME: this could probably go in fd_exec_test_instr_context_create? */
+    fd_txn_t * txn_descriptor = (fd_txn_t *)fd_spad_alloc_debug( spad, fd_txn_align(), fd_txn_footprint( ctx->txn_ctx->instr_info_cnt, 0UL ) );
+    txn_descriptor->transaction_version = FD_TXN_V0;
+    txn_descriptor->acct_addr_cnt = (ushort)ctx->txn_ctx->accounts_cnt;
+
+    ctx->txn_ctx->txn_descriptor = txn_descriptor;
+  }
+
+  ctx->txn_ctx->instr_trace[0].instr_info = (fd_instr_info_t *)ctx->instr;
+  ctx->txn_ctx->instr_trace[0].stack_height = 1;
 
   /* Capture outputs */
   ulong output_end = (ulong)output_buf + output_bufsz;
@@ -1750,8 +1448,8 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
   fd_vm_input_region_t * input_regions = NULL;
   uint input_regions_count = 0U;
   if( !!(input->vm_ctx.input_data_regions_count) ) {
-    input_regions       = fd_valloc_malloc( valloc, alignof(fd_vm_input_region_t), sizeof(fd_vm_input_region_t) * input->vm_ctx.input_data_regions_count );
-    input_regions_count = setup_vm_input_regions( input_regions, input->vm_ctx.input_data_regions, input->vm_ctx.input_data_regions_count, valloc );
+    input_regions       = fd_spad_alloc_debug( spad, alignof(fd_vm_input_region_t), sizeof(fd_vm_input_region_t) * input->vm_ctx.input_data_regions_count );
+    input_regions_count = fd_setup_vm_input_regions( input_regions, input->vm_ctx.input_data_regions, input->vm_ctx.input_data_regions_count, spad );
     if ( !input_regions_count ) {
       goto error;
     }
@@ -1769,7 +1467,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
   /* If the program ID account owner is the v1 BPF loader, then alignment is disabled (controlled by
      the `is_deprecated` flag) */
   uchar program_id_idx = ctx->instr->program_id;
-  uchar is_deprecated = ( program_id_idx < ctx->txn_ctx->accounts_cnt ) && 
+  uchar is_deprecated = ( program_id_idx < ctx->txn_ctx->accounts_cnt ) &&
                         ( !memcmp( ctx->txn_ctx->borrowed_accounts[program_id_idx].const_meta->info.owner, fd_solana_bpf_loader_deprecated_program_id.key, sizeof(fd_pubkey_t) ) );
 
   fd_vm_init(
@@ -1785,6 +1483,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
     0, // TODO, text_sz
     0, // TODO
     NULL, // TODO
+    TEST_VM_DEFAULT_SBPF_VERSION,
     syscalls,
     NULL, // TODO
     sha,
@@ -1793,11 +1492,6 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
     NULL,
     is_deprecated,
     FD_FEATURE_ACTIVE( ctx->slot_ctx, bpf_account_data_direct_mapping ) );
-
-  // Setup the vm state for execution
-  if( fd_vm_setup_state_for_execution( vm ) != FD_VM_SUCCESS ) {
-    goto error;
-  }
 
   // Override some execution state values from the syscall fuzzer input
   // This is so we can test if the syscall mutates any of these erroneously
@@ -1828,7 +1522,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
 
   // Propogate the acc_regions_meta to the vm
   vm->acc_region_metas = fd_valloc_malloc( valloc, alignof(fd_vm_acc_region_meta_t), sizeof(fd_vm_acc_region_meta_t) * input->vm_ctx.input_data_regions_count );
-  setup_vm_acc_region_metas( vm->acc_region_metas, vm, vm->instr_ctx );
+  fd_setup_vm_acc_region_metas( vm->acc_region_metas, vm, vm->instr_ctx );
 
   // Look up the syscall to execute
   char * syscall_name = (char *)input->syscall_invocation.function_name.bytes;
@@ -1861,10 +1555,10 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
         access violations in Agave. The agave_access_violation_mask bitset sets
         the error codes that are expected to be access violations in Agave. */
     if( is_cpi &&
-      ( syscall_err == FD_VM_ERR_SYSCALL_TOO_MANY_SIGNERS ||
-        syscall_err == FD_VM_ERR_SYSCALL_INSTRUCTION_TOO_LARGE ||
-        syscall_err == FD_VM_ERR_SYSCALL_MAX_INSTRUCTION_ACCOUNTS_EXCEEDED ||
-        syscall_err == FD_VM_ERR_SYSCALL_MAX_INSTRUCTION_ACCOUNT_INFOS_EXCEEDED ) ) {
+      ( syscall_err == FD_VM_SYSCALL_ERR_TOO_MANY_SIGNERS ||
+        syscall_err == FD_VM_SYSCALL_ERR_INSTRUCTION_TOO_LARGE ||
+        syscall_err == FD_VM_SYSCALL_ERR_MAX_INSTRUCTION_ACCOUNTS_EXCEEDED ||
+        syscall_err == FD_VM_SYSCALL_ERR_MAX_INSTRUCTION_ACCOUNT_INFOS_EXCEEDED ) ) {
 
       /* FD performs pre-flight checks that manifest as access violations in Agave */
       vm->instr_ctx->txn_ctx->exec_err      = FD_VM_ERR_EBPF_ACCESS_VIOLATION;
@@ -1918,7 +1612,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
   }
 
   effects->stack = FD_SCRATCH_ALLOC_APPEND(
-    l, alignof(uint), PB_BYTES_ARRAY_T_ALLOCSIZE( FD_VM_STACK_MAX ) );
+    l, alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE( FD_VM_STACK_MAX ) );
     if( FD_UNLIKELY( _l > output_end ) ) {
       goto error;
     }
@@ -1927,7 +1621,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
 
   if( vm->rodata_sz ) {
     effects->rodata = FD_SCRATCH_ALLOC_APPEND(
-      l, alignof(uint), PB_BYTES_ARRAY_T_ALLOCSIZE( rodata_sz ) );
+      l, alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE( rodata_sz ) );
     if( FD_UNLIKELY( _l > output_end ) ) {
       goto error;
     }
@@ -1944,7 +1638,7 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
      https://github.com/firedancer-io/solfuzz-agave/blob/99758d3c4f3a342d56e2906936458d82326ae9a8/src/utils/err_map.rs#L148 */
   if( effects->error != -1 && log->buf_sz ) {
     effects->log = FD_SCRATCH_ALLOC_APPEND(
-      l, alignof(uchar), PB_BYTES_ARRAY_T_ALLOCSIZE( log->buf_sz ) );
+      l, alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE( log->buf_sz ) );
     if( FD_UNLIKELY( _l > output_end ) ) {
       goto error;
     }
@@ -1969,14 +1663,14 @@ fd_exec_vm_syscall_test_run( fd_exec_instr_test_runner_t * runner,
 
   /* Return the effects */
   ulong actual_end = tmp_end + input_regions_size;
-  fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+  fd_exec_test_instr_context_destroy( runner, ctx );
   cpi_exec_effects = NULL;
 
   *output = effects;
   return actual_end - (ulong)output_buf;
 
 error:
-  fd_exec_test_instr_context_destroy( runner, ctx, wksp, alloc );
+  fd_exec_test_instr_context_destroy( runner, ctx );
   cpi_exec_effects = NULL;
   return 0;
 }

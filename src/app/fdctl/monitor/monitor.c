@@ -2,9 +2,6 @@
 
 #include "generated/monitor_seccomp.h"
 #include "helper.h"
-#include "../run/run.h"
-#include "../../../disco/tiles.h"
-#include "../../../disco/fd_disco.h"
 
 #include <stdio.h>
 #include <signal.h>
@@ -89,7 +86,7 @@ tile_snap( tile_snap_t * snap_cur,     /* Snapshot for each tile, indexed [0,til
     tile_snap_t * snap = &snap_cur[ tile_idx ];
 
     fd_topo_tile_t * tile = &topo->tiles[ tile_idx ];
-    snap->heartbeat = fd_metrics_tile( tile->metrics )[ FD_METRICS_GAUGE_STEM_HEARTBEAT_OFF ];
+    snap->heartbeat = fd_metrics_tile( tile->metrics )[ FD_METRICS_GAUGE_TILE_HEARTBEAT_OFF ];
 
     fd_metrics_register( tile->metrics );
 
@@ -97,10 +94,10 @@ tile_snap( tile_snap_t * snap_cur,     /* Snapshot for each tile, indexed [0,til
     snap->pid       = FD_MGAUGE_GET( TILE, PID );
     snap->nvcsw     = FD_MCNT_GET( TILE, CONTEXT_SWITCH_VOLUNTARY_COUNT );
     snap->nivcsw    = FD_MCNT_GET( TILE, CONTEXT_SWITCH_INVOLUNTARY_COUNT );
-    snap->in_backp  = FD_MGAUGE_GET( STEM, IN_BACKPRESSURE );
-    snap->backp_cnt = FD_MCNT_GET( STEM, BACKPRESSURE_COUNT );
+    snap->in_backp  = FD_MGAUGE_GET( TILE, IN_BACKPRESSURE );
+    snap->backp_cnt = FD_MCNT_GET( TILE, BACKPRESSURE_COUNT );
     for( ulong i=0UL; i<9UL; i++ ) {
-      snap->regime_ticks[ i ] = fd_metrics_tl[ MIDX(COUNTER, STEM, REGIME_DURATION_NANOS)+i ];
+      snap->regime_ticks[ i ] = fd_metrics_tl[ MIDX(COUNTER, TILE, REGIME_DURATION_NANOS)+i ];
     }
     FD_COMPILER_MFENCE();
   }
@@ -156,7 +153,7 @@ link_snap( link_snap_t * snap_cur,
       if( FD_LIKELY( topo->tiles[ tile_idx ].in_link_poll[ in_idx ] ) ) {
         in_metrics = (ulong const *)fd_metrics_link_in( topo->tiles[ tile_idx ].metrics, in_idx );
       }
-      
+
       fd_topo_link_t * link = &topo->links[ topo->tiles[ tile_idx ].in_link_id[ in_idx ] ];
       ulong producer_id = fd_topo_find_link_producer( topo, link );
       FD_TEST( producer_id!=ULONG_MAX );
@@ -345,7 +342,7 @@ run_monitor( config_t * const config,
       PRINT( " | " ); printf_err_cnt ( &buf, &buf_sz, cur->nvcsw,           prv->nvcsw  );
       PRINT( " | " ); printf_err_bool( &buf, &buf_sz, cur->in_backp,        prv->in_backp   );
       PRINT( " | " ); printf_err_cnt ( &buf, &buf_sz, cur->backp_cnt,       prv->backp_cnt  );
-  
+
       ulong cur_hkeep_ticks      = cur->regime_ticks[0]+cur->regime_ticks[1]+cur->regime_ticks[2];
       ulong prv_hkeep_ticks      = prv->regime_ticks[0]+prv->regime_ticks[1]+prv->regime_ticks[2];
 

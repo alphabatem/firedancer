@@ -109,6 +109,7 @@ typedef struct {
     ushort port;
     int    full_api;
     int    private;
+    char   bind_address[ 16 ];
     int    transaction_history;
     int    extended_tx_metadata_storage;
     int    only_known;
@@ -132,6 +133,7 @@ typedef struct {
     char affinity[ AFFINITY_SZ ];
     char agave_affinity[ AFFINITY_SZ ];
 
+    uint agave_unified_scheduler_handler_threads;
     uint net_tile_count;
     uint quic_tile_count;
     uint resolv_tile_count;
@@ -147,6 +149,17 @@ typedef struct {
   } hugetlbfs;
 
   struct {
+    ulong shred_max;
+    ulong block_max;
+    ulong idx_max;
+    ulong txn_max;
+    ulong alloc_max;
+    char  file[PATH_MAX];
+    char  checkpt[PATH_MAX];
+    char  restore[PATH_MAX];
+  } blockstore;
+
+  struct {
     int sandbox;
     int no_clone;
     int no_agave;
@@ -155,10 +168,10 @@ typedef struct {
 
     struct {
       int  enabled;
-      char interface0     [ 256 ];
+      char interface0     [ 16 ];
       char interface0_mac [ 32 ];
       char interface0_addr[ 32 ];
-      char interface1     [ 256 ];
+      char interface1     [ 16 ];
       char interface1_mac [ 32 ];
       char interface1_addr[ 32 ];
     } netns;
@@ -212,9 +225,7 @@ typedef struct {
 
       uint txn_reassembly_count;
       uint max_concurrent_connections;
-      uint max_concurrent_streams_per_connection;
       uint max_concurrent_handshakes;
-      uint max_inflight_quic_packets;
       uint idle_timeout_millis;
       uint ack_delay_millis;
       int  retry;
@@ -222,6 +233,7 @@ typedef struct {
     } quic;
 
     struct {
+      uint signature_cache_size;
       uint receive_buffer_size;
       uint mtu;
     } verify;
@@ -234,6 +246,10 @@ typedef struct {
       uint max_pending_transactions;
       int  use_consumed_cus;
     } pack;
+
+    struct {
+      int lagged_consecutive_leader_start;
+    } poh;
 
     struct {
       uint   max_pending_shred_sets;
@@ -264,11 +280,10 @@ typedef struct {
     struct {
       ushort repair_intake_listen_port;
       ushort repair_serve_listen_port;
+      char   good_peer_cache_file[ PATH_MAX ];
     } repair;
 
     struct {
-      char  blockstore_checkpt[ PATH_MAX ];
-      int   blockstore_publish;
       char  capture[ PATH_MAX ];
       char  funk_checkpt[ PATH_MAX ];
       ulong funk_rec_max;
@@ -282,14 +297,23 @@ typedef struct {
       char  status_cache[ PATH_MAX ];
       ulong tpool_thread_count;
       char  cluster_version[ 32 ];
+      int   in_wen_restart;
+      char  tower_checkpt[ PATH_MAX ];
+      char  wen_restart_coordinator[ FD_BASE58_ENCODED_32_SZ ];
     } replay;
 
     struct {
-      char  blockstore_restore[ PATH_MAX ];
       char  slots_pending[PATH_MAX];
       char  shred_cap_archive[ PATH_MAX ];
       char  shred_cap_replay[ PATH_MAX ];
     } store_int;
+
+    struct {
+      ulong full_interval;
+      ulong incremental_interval;
+      char  out_dir[ PATH_MAX ];
+      ulong hash_tpool_thread_count;
+    } batch;
 
   } tiles;
 } config_t;

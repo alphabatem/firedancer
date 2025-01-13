@@ -3,11 +3,8 @@
 
 #include "../fdctl/configure/configure.h"
 #include "../fdctl/run/run.h"
-#include "rpc_client/fd_rpc_client.h"
 
 #include "../../disco/topo/fd_topob.h"
-#include "../../disco/keyguard/fd_keyload.h"
-#include "../../util/net/fd_ip4.h"
 #include "../../util/shmem/fd_shmem_private.h"
 
 #include <unistd.h>
@@ -77,8 +74,8 @@ add_bench_topo( fd_topo_t  * topo,
                 int          no_quic ) {
 
   fd_topob_wksp( topo, "bench" );
-  fd_topob_link( topo, "bencho_out", "bench", 0, 128UL, 64UL, 1UL );
-  for( ulong i=0UL; i<benchg_tile_cnt; i++ ) fd_topob_link( topo, "benchg_s", "bench", 0, 65536UL, FD_TXN_MTU, 1UL );
+  fd_topob_link( topo, "bencho_out", "bench", 128UL, 64UL, 1UL );
+  for( ulong i=0UL; i<benchg_tile_cnt; i++ ) fd_topob_link( topo, "benchg_s", "bench", 65536UL, FD_TXN_MTU, 1UL );
 
   int is_bench_auto_affinity = !strcmp( affinity, "auto" );
 
@@ -154,6 +151,15 @@ bench_cmd_fn( args_t *         args,
 
   config->rpc.port     = fd_ushort_if( config->rpc.port, config->rpc.port, 8899 );
   config->rpc.full_api = 1;
+
+  int is_auto_affinity = !strcmp( config->layout.affinity, "auto" );
+  int is_agave_auto_affinity = !strcmp( config->layout.agave_affinity, "auto" );
+  int is_bench_auto_affinity = !strcmp( config->development.bench.affinity, "auto" );
+
+  if( FD_UNLIKELY( is_auto_affinity != is_agave_auto_affinity ||
+                   is_auto_affinity != is_bench_auto_affinity ) ) {
+    FD_LOG_ERR(( "The CPU affinity string in the configuration file under [layout.affinity], [layout.agave_affinity], and [development.bench.affinity] must all be set to 'auto' or all be set to a specific CPU affinity string." ));
+  }
 
   add_bench_topo( &config->topo,
                   config->development.bench.affinity,

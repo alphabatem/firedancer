@@ -6,12 +6,12 @@
 #include "context/fd_exec_txn_ctx.h"
 #include "context/fd_exec_instr_ctx.h"
 
-#include "../nanopb/pb_encode.h"
 #include "../../util/rng/fd_rng.h"
 #include "fd_system_ids.h"
 #include "fd_account.h"
 #include "program/fd_address_lookup_table_program.h"
 #include "program/fd_bpf_loader_program.h"
+#include "program/fd_loader_v4_program.h"
 #include "program/fd_compute_budget_program.h"
 #include "program/fd_config_program.h"
 #include "program/fd_precompiles.h"
@@ -25,17 +25,15 @@
 #include "sysvar/fd_sysvar_epoch_schedule.h"
 #include "sysvar/fd_sysvar_instructions.h"
 
+#include "tests/fd_dump_pb.h"
+
 #include "../../ballet/base58/fd_base58.h"
 #include "../../ballet/pack/fd_pack.h"
 #include "../../ballet/pack/fd_pack_cost.h"
 #include "../../ballet/sbpf/fd_sbpf_loader.h"
+#include "../../ballet/pack/fd_pack.h"
 
 #include "../../util/bits/fd_uwide.h"
-
-#define SORT_NAME        sort_uint64_t
-#define SORT_KEY_T       uint64_t
-#define SORT_BEFORE(a,b) (a)<(b)
-#include "../../util/tmpl/fd_sort.c"
 
 #include <assert.h>
 #include <errno.h>
@@ -46,8 +44,12 @@
 
 #define MAX_COMPUTE_UNITS_PER_BLOCK                (48000000UL)
 #define MAX_COMPUTE_UNITS_PER_WRITE_LOCKED_ACCOUNT (12000000UL)
-
-#define MAX_TX_ACCOUNT_LOCKS (128UL)
+/* We should strive for these max limits matching between pack and the
+   runtime. If there's a reason for these limits to mismatch, and there
+   could be, then someone should explicitly document that when relaxing
+   these assertions. */
+FD_STATIC_ASSERT( FD_PACK_MAX_COST_PER_BLOCK==MAX_COMPUTE_UNITS_PER_BLOCK,                     executor_pack_max_mismatch );
+FD_STATIC_ASSERT( FD_PACK_MAX_WRITE_COST_PER_ACCT==MAX_COMPUTE_UNITS_PER_WRITE_LOCKED_ACCOUNT, executor_pack_max_mismatch );
 
 /* TODO: precompiles currently enter this noop function. Once the move_precompile_verification_to_svm
    feature gets activated, this will need to be replaced with precompile verification functions. */
@@ -65,7 +67,7 @@ typedef struct fd_native_prog_info fd_native_prog_info_t;
 #define MAP_PERFECT_NAME fd_native_program_fn_lookup_tbl
 #define MAP_PERFECT_LG_TBL_SZ 4
 #define MAP_PERFECT_T fd_native_prog_info_t
-#define MAP_PERFECT_HASH_C 13U
+#define MAP_PERFECT_HASH_C 478U
 #define MAP_PERFECT_KEY key.uc
 #define MAP_PERFECT_KEY_T fd_pubkey_t const *
 #define MAP_PERFECT_ZERO_KEY  (0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0)
@@ -89,8 +91,10 @@ typedef struct fd_native_prog_info fd_native_prog_info_t;
 #define MAP_PERFECT_7       ( BPF_LOADER_1_PROG_ID    ), .fn = fd_bpf_loader_program_execute
 #define MAP_PERFECT_8       ( BPF_LOADER_2_PROG_ID    ), .fn = fd_bpf_loader_program_execute
 #define MAP_PERFECT_9       ( BPF_UPGRADEABLE_PROG_ID ), .fn = fd_bpf_loader_program_execute
-#define MAP_PERFECT_10      ( ED25519_SV_PROG_ID      ), .fn = fd_noop_instr_execute
-#define MAP_PERFECT_11      ( KECCAK_SECP_PROG_ID     ), .fn = fd_noop_instr_execute
+#define MAP_PERFECT_10      ( LOADER_V4_PROG_ID       ), .fn = fd_loader_v4_program_execute
+#define MAP_PERFECT_11      ( ED25519_SV_PROG_ID      ), .fn = fd_noop_instr_execute
+#define MAP_PERFECT_12      ( KECCAK_SECP_PROG_ID     ), .fn = fd_noop_instr_execute
+#define MAP_PERFECT_13      ( SECP256R1_PROG_ID       ), .fn = fd_noop_instr_execute
 
 #include "../../util/tmpl/fd_map_perfect.c"
 #undef PERFECT_HASH
@@ -101,7 +105,8 @@ fd_executor_lookup_native_program( fd_borrowed_account_t const * prog_acc ) {
   fd_pubkey_t const * pubkey        = prog_acc->pubkey;
   fd_pubkey_t const * owner         = (fd_pubkey_t const *)prog_acc->const_meta->info.owner;
 
-  /* Native programs should be owned by the native loader... */
+  /* Native programs should be owned by the native loader...
+     This will not be the case though once core programs are migrated to BPF. */
   int is_native_program = !memcmp( owner, fd_solana_native_loader_id.key, sizeof(fd_pubkey_t) );
   if( FD_UNLIKELY( !memcmp( pubkey, fd_solana_ed25519_sig_verify_program_id.key, sizeof(fd_pubkey_t) ) &&
                    !memcmp( owner,  fd_solana_system_program_id.key,             sizeof(fd_pubkey_t) ) ) ) {
@@ -157,7 +162,7 @@ FD_SCRATCH_SCOPE_BEGIN {
 } FD_SCRATCH_SCOPE_END;
 }
 
-int
+static int
 check_rent_transition( fd_borrowed_account_t * account, fd_rent_t const * rent, ulong fee ) {
   ulong min_balance   = fd_rent_exempt_minimum_balance( rent, account->const_meta->dlen );
   ulong pre_lamports  = account->const_meta->info.lamports;
@@ -247,7 +252,10 @@ fd_executor_check_status_cache( fd_exec_txn_ctx_t * txn_ctx ) {
   curr_query.blockhash = blockhash->uc;
   fd_blake3_t b3[1];
 
+  /* Compute the blake3 hash of the transaction message
+     https://github.com/anza-xyz/agave/blob/v2.1.7/sdk/program/src/message/versions/mod.rs#L159-L167 */
   fd_blake3_init( b3 );
+  fd_blake3_append( b3, "solana-tx-message-v1", 20UL );
   fd_blake3_append( b3, ((uchar *)txn_ctx->_txn_raw->raw + txn_ctx->txn_descriptor->message_off),(ulong)( txn_ctx->_txn_raw->txn_sz - txn_ctx->txn_descriptor->message_off ) );
   fd_blake3_fini( b3, &txn_ctx->blake_txn_msg_hash );
   curr_query.txnhash = txn_ctx->blake_txn_msg_hash.uc;
@@ -297,9 +305,39 @@ fd_executor_verify_precompiles( fd_exec_txn_ctx_t * txn_ctx ) {
         FD_TXN_ERR_FOR_LOG_INSTR( txn_ctx, err, i );
         return FD_RUNTIME_TXN_ERR_INSTRUCTION_ERROR;
       }
+    } else if( !memcmp( program_id, &fd_solana_secp256r1_program_id, sizeof(fd_pubkey_t)) && FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, enable_secp256r1_precompile ) ) {
+      err = fd_precompile_secp256r1_verify( txn_ctx, instr );
+      if( FD_UNLIKELY( err ) ) {
+        FD_TXN_ERR_FOR_LOG_INSTR( txn_ctx, err, i );
+        return FD_RUNTIME_TXN_ERR_INSTRUCTION_ERROR;
+      }
     }
   }
   return FD_RUNTIME_EXECUTE_SUCCESS;
+}
+
+
+/* Only accounts in the transaction account keys that are owned by one of the four 
+   loaders (bpf v1, v2, v3, v4) are iterated over in Agave's replenish_program_cache() 
+   function to be loaded into the program cache. An account may be in the program cache 
+   iff the owners match one of the four loaders since `filter_executable_program_accounts()` 
+   filters out all other accounts here:
+   https://github.com/anza-xyz/agave/blob/v2.1/svm/src/transaction_processor.rs#L530-L560
+ 
+   If this check holds true, the account is promoted to an executable account within 
+   `fd_execute_load_transaction_accounts()`, which sadly involves modifying its read-only metadata
+   to set the `executable` flag to true.
+ 
+   Note that although the v4 loader is not yet activated, Agave still checks that the
+   owner matches one of the four bpf loaders provided in the hyperlink below
+   within `filter_executable_program_accounts()`:
+   https://github.com/anza-xyz/agave/blob/v2.1/sdk/account/src/lib.rs#L800-L806 */
+FD_FN_PURE static inline int
+is_maybe_in_loaded_program_cache( fd_borrowed_account_t const * acct ) {
+  return !memcmp( acct->const_meta->info.owner, fd_solana_bpf_loader_deprecated_program_id.key,  sizeof(fd_pubkey_t) ) ||
+         !memcmp( acct->const_meta->info.owner, fd_solana_bpf_loader_program_id.key,             sizeof(fd_pubkey_t) ) ||
+         !memcmp( acct->const_meta->info.owner, fd_solana_bpf_loader_upgradeable_program_id.key, sizeof(fd_pubkey_t) ) ||
+         !memcmp( acct->const_meta->info.owner, fd_solana_bpf_loader_v4_program_id.key,          sizeof(fd_pubkey_t) );
 }
 
 /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L410-427 */
@@ -321,31 +359,37 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
   ulong                 requested_loaded_accounts_data_size = txn_ctx->loaded_accounts_data_size_limit;
   ulong                 accumulated_account_size            = 0UL;
   fd_rawtxn_b_t const * txn_raw                             = txn_ctx->_txn_raw;
+  ushort                instr_cnt                           = txn_ctx->txn_descriptor->instr_cnt;
 
-  /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L217-L296 */
-  /* In the agave client, this loop is responsible for loading in all of the
-     accounts in the transaction. This contains a LOT of special casing as their
-     accounts database is handled very differently than the FD client.
+  /* https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L323-L337 
+     
+     In the agave client, this big chunk of code is responsible for loading in all of the
+     accounts in the transaction, mimicking each call to `load_transaction_account()`
+     (https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L406-L497)
+     
+     This contains a LOT of special casing as their accounts database and program cache
+     is handled very differently than the FD client.
 
      The logic is as follows:
      1. If the account is the instructions sysvar, then load in the compiled
         instructions from the transactions into the sysvar's data.
      2. If the account is a fee payer, then it is already loaded.
      3. If the account is an account override, then handle seperately. Account
-        overrides are used for simulating transactions.
+        overrides are used for simulating transactions. 
+        - This is only used for testing.
      4. If the account is not writable and not an instruction account and it is
         in the loaded program cache, then load in a dummy account with the
         correct owner and the executable flag set to true.
+        - See comments below
      5. Otherwise load in the account from the accounts DB. If the account is
         writable try to collect rent from the account.
 
-     After the account is loaded accumulate the data size to make sure the
+     After the account is loaded, accumulate the data size to make sure the
      transaction doesn't violate the transaction loading limit.
 
      In the firedancer client only some of these steps are necessary because
      all of the accounts are loaded in from the accounts db into borrowed
-     accounts already. The instruction sysvar gets loaded in later in
-     fd_execute_txn
+     accounts already.
      1. If the account is writable, try to collect fees on the account. Unlike
         the agave client, this is also done on the fee payer account. The agave
         client tries to collect rent on the fee payer while the fee is being
@@ -358,21 +402,75 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
   fd_epoch_schedule_t const * schedule = fd_sysvar_cache_epoch_schedule( txn_ctx->slot_ctx->sysvar_cache );
   ulong                       epoch    = fd_slot_to_epoch( schedule, txn_ctx->slot_ctx->slot_bank.slot, NULL );
 
+  /* In `load_transaction_account()`, there are special checks based on the priviledges of each account key.
+     We precompute the results here before proceeding with the special casing. Note the start range of 1 since
+     `load_transaction_account()` doesn't handle the fee payer. */
+  uchar txn_account_is_instruction_account[MAX_TX_ACCOUNT_LOCKS] = {0};
+  for( ushort i=0UL; i<instr_cnt; i++ ) {
+    /* Set up the instr infos for the transaction */
+    fd_txn_instr_t const * instr = &txn_ctx->txn_descriptor->instr[i];
+    fd_convert_txn_instr_to_instr( txn_ctx, instr, txn_ctx->borrowed_accounts, &txn_ctx->instr_infos[i] );
+
+    uchar const * instr_acc_idxs = fd_txn_get_instr_accts( instr, txn_raw->raw );
+    for( ushort j=0; j<instr->acct_cnt; j++ ) {
+      uchar txn_acc_idx                               = instr_acc_idxs[j];
+      txn_account_is_instruction_account[txn_acc_idx] = 1;
+    }
+  }
+  txn_ctx->instr_info_cnt = txn_ctx->txn_descriptor->instr_cnt;
+
   for( ulong i=1UL; i<txn_ctx->accounts_cnt; i++ ) {
-    fd_borrowed_account_t * acct = NULL;
+    fd_borrowed_account_t * acct = &txn_ctx->borrowed_accounts[i];
+
+    /* https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L418-L421 */
+    uchar is_instruction_account = txn_account_is_instruction_account[i];
+    uchar is_writable            = !!( fd_txn_account_is_writable_idx( txn_ctx, (int)i ) );
+
+    /* https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L417 */
 
     int   err      = fd_txn_borrowed_account_view_idx( txn_ctx, (uchar)i, &acct );
     ulong acc_size = err==FD_ACC_MGR_SUCCESS ? acct->const_meta->dlen : 0UL;
 
-    /* Try to collect rent on all writable accounts, except the fee payer (who's rent was already
-       collected within fd_executor_validate_transaction_fee_payer()). If rent is collected
-       successfully, update the starting lamports accordingly to avoid
-       unbalanced lamports issues during instruction execution.
-       TODO: the rent epoch check in the conditional should probably be moved
-       to inside fd_runtime_collect_rent_from_account. */
-    if( fd_txn_account_is_writable_idx( txn_ctx, (int)i ) && acct->const_meta->info.rent_epoch<=epoch ) {
-      txn_ctx->collected_rent += fd_runtime_collect_rent_from_account( txn_ctx->slot_ctx, acct->meta, acct->pubkey, epoch );
-      acct->starting_lamports = acct->meta->info.lamports;
+    /* `load_transaction_account()`
+        https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L406-L497 */
+
+    /* First case: checking if the account is the instructions sysvar
+       https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L422-L429 */
+    if( FD_UNLIKELY( !memcmp( acct->pubkey->key, fd_sysvar_instructions_id.key, sizeof(fd_pubkey_t) ) ) ) {
+      acct->account_found = 1;
+      fd_sysvar_instructions_serialize_account( txn_ctx, (fd_instr_info_t const *)txn_ctx->instr_infos, txn_ctx->txn_descriptor->instr_cnt );
+      /* Continue because this should not be counted towards the total loaded account size.
+         https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L426 */
+      continue;
+    } 
+
+    /* Second case: loading a program account that is not writable, not an instruction account,
+       not already executable, and may be in the loaded program cache. We bypass this special casing
+       if `disable_account_loader_special_case` is active.
+       https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L438-L451 */
+    if( FD_UNLIKELY( !fd_account_is_executable( acct->const_meta ) && 
+                     !is_instruction_account && !is_writable && 
+                     !FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, disable_account_loader_special_case ) && 
+                     is_maybe_in_loaded_program_cache( acct ) ) ) {
+      /* In the corresponding branch in the agave client, a dummy account is loaded in that has the
+         executable flag set to true. This is a hack to mirror those semantics.
+         https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L499-L507 */
+      void * borrowed_account_data = fd_spad_alloc( txn_ctx->spad, FD_ACCOUNT_REC_ALIGN, FD_ACC_TOT_SZ_MAX );
+      fd_borrowed_account_make_readonly_copy( acct, borrowed_account_data );
+      fd_account_meta_t * meta = (fd_account_meta_t *)acct->const_meta;
+      meta->info.executable = 1;
+      acct->account_found = 1;
+    }
+    /* Third case: Default case 
+       https://github.com/anza-xyz/agave/blob/v2.1.0/svm/src/account_loader.rs#L452-L494 */
+    else {
+      /* If the account exists and is writable, collect rent from it. */
+      if( FD_LIKELY( acct->account_found ) ) {
+        if( is_writable ) {
+          txn_ctx->collected_rent += fd_runtime_collect_rent_from_account( txn_ctx->slot_ctx, acct->meta, acct->pubkey, epoch );
+          acct->starting_lamports = acct->meta->info.lamports;
+        }
+      }
     }
 
     err = accumulate_and_check_loaded_account_data_size( acc_size,
@@ -384,17 +482,16 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
     }
   }
 
-  ushort      instr_cnt = txn_ctx->txn_descriptor->instr_cnt;
   fd_pubkey_t program_owners[instr_cnt];
   ushort      program_owners_cnt = 0;
 
-  /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L297-L358 */
+  /* The logic below handles special casing with loading instruction accounts.
+     https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L297-L358 */
   for( ushort i=0; i<instr_cnt; i++ ) {
     fd_txn_instr_t const * instr = &txn_ctx->txn_descriptor->instr[i];
-
     /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L304-306 */
     fd_borrowed_account_t * program_account = NULL;
-    int err = fd_txn_borrowed_account_view_idx( txn_ctx, instr->program_id, &program_account );
+    int err = fd_txn_borrowed_account_view_idx_allow_dead( txn_ctx, instr->program_id, &program_account );
     if( FD_UNLIKELY( err!=FD_ACC_MGR_SUCCESS ) ) {
       return FD_RUNTIME_TXN_ERR_PROGRAM_ACCOUNT_NOT_FOUND;
     }
@@ -404,55 +501,21 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
       continue;
     }
 
-    /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L317-320 */
-    if( FD_UNLIKELY( !fd_account_is_executable( program_account->const_meta ) ) ) {
-      /* In the agave client if an account...
-         - not writable
-         - not an instruction account
-         - in the loaded program cache
-         then a dummy account is loaded in that has the
-         executable flag set to true. This is a hack to mirror those semantics.
-         https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L239-249 */
-
-      /* If it is not writable */
-      if( fd_txn_account_is_writable_idx( txn_ctx, instr->program_id ) ) {
-        return FD_RUNTIME_TXN_ERR_INVALID_PROGRAM_FOR_EXECUTION;
-      }
-
-      /* If it is not an instruction account */
-      for( ushort j=0; j<instr_cnt; j++ ) {
-        fd_txn_instr_t const * txn_instr = &txn_ctx->txn_descriptor->instr[j];
-        uchar const * instr_acc_idxs = fd_txn_get_instr_accts( txn_instr, txn_raw->raw );
-        for( ushort k=0; k<txn_instr->acct_cnt; k++ ) {
-          if( instr_acc_idxs[k]==instr->program_id ) {
-            return FD_RUNTIME_TXN_ERR_INVALID_PROGRAM_FOR_EXECUTION;
-          }
-        }
-      }
-
-      /* If it is not in the loaded program cache. Only accounts in the transaction 
-         account keys that are owned by one of the four loaders (bpf v1, v2, v3, v4) 
-         are iterated over in Agave's replenish_program_cache() function to be loaded
-         into the program cache. If we reach this far in the code path, then this 
-         account should be in the program cache iff the owners match one of the four loaders
-         since `filter_executable_program_accounts()` filters out all other accounts here:
-         https://github.com/anza-xyz/agave/blob/v2.1/svm/src/transaction_processor.rs#L530-L560
-         
-         Note that although the v4 loader is not yet activated, Agave still checks that the 
-         owner matches one of the four bpf loaders provided in the hyperlink below 
-         within `filter_executable_program_accounts()`:
-         https://github.com/anza-xyz/agave/blob/v2.1/sdk/account/src/lib.rs#L800-L806 */
-      if( FD_UNLIKELY( ( memcmp( program_account->const_meta->info.owner, fd_solana_bpf_loader_deprecated_program_id.key,  sizeof(fd_pubkey_t) )   &&
-                         memcmp( program_account->const_meta->info.owner, fd_solana_bpf_loader_program_id.key,             sizeof(fd_pubkey_t) )   &&
-                         memcmp( program_account->const_meta->info.owner, fd_solana_bpf_loader_upgradeable_program_id.key, sizeof(fd_pubkey_t) ) ) &&
-                         memcmp( program_account->const_meta->info.owner, fd_solana_bpf_loader_v4_program_id.key,          sizeof(fd_pubkey_t) ) ) ) {
-        return FD_RUNTIME_TXN_ERR_INVALID_PROGRAM_FOR_EXECUTION;
-      }
-
-      /* Set readonly account's executable status (lol) */
-      fd_account_meta_t * meta = (fd_account_meta_t *)program_account->const_meta;
-      meta->info.executable = 1;
+    /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L311-L314 */
+    if( FD_UNLIKELY( !program_account->account_found ) ) {
+      return FD_RUNTIME_TXN_ERR_PROGRAM_ACCOUNT_NOT_FOUND;
     }
+
+    /* The above checks from the mirrored `load_transaction_account()` function would promote
+       this account to executable if necessary, so this check is sufficient.
+       https://github.com/anza-xyz/agave/blob/89872fdb074e6658646b2b57a299984f0059cc84/svm/src/account_loader.rs#L493-L500 */
+    if( FD_UNLIKELY( !FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, remove_accounts_executable_flag_checks ) && 
+                     !fd_account_is_executable( program_account->const_meta ) ) ) {
+      return FD_RUNTIME_TXN_ERR_INVALID_PROGRAM_FOR_EXECUTION;
+    }
+
+    /* At this point, program_indices will no longer have 0 length, so we are set this flag to 1 */
+    /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L321 */
 
     /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L322-325 */
     if( !memcmp( program_account->const_meta->info.owner, fd_solana_native_loader_id.key, sizeof(fd_pubkey_t) ) ) {
@@ -480,9 +543,10 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
       }
     }
 
-    /* https://github.com/anza-xyz/agave/blob/v2.0.9/svm/src/account_loader.rs#L335-341 */
+    /* https://github.com/anza-xyz/agave/blob/89872fdb074e6658646b2b57a299984f0059cc84/svm/src/account_loader.rs#L537-L545 */
     if( FD_UNLIKELY( memcmp( owner_account->const_meta->info.owner, fd_solana_native_loader_id.key, sizeof(fd_pubkey_t) ) ||
-                     !fd_account_is_executable( owner_account->const_meta ) ) ) {
+                     ( !FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, remove_accounts_executable_flag_checks ) &&
+                       !fd_account_is_executable( owner_account->const_meta ) ) ) ) {
       return FD_RUNTIME_TXN_ERR_INVALID_PROGRAM_FOR_EXECUTION;
     }
 
@@ -502,24 +566,18 @@ fd_executor_load_transaction_accounts( fd_exec_txn_ctx_t * txn_ctx ) {
   return FD_RUNTIME_EXECUTE_SUCCESS;
 }
 
-/* https://github.com/anza-xyz/agave/blob/v2.0.9/runtime/src/bank.rs#L3239-L3251 */
-static inline ulong
-get_transaction_account_lock_limit( fd_exec_txn_ctx_t const * txn_ctx ) {
-  return fd_ulong_if( FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, increase_tx_account_lock_limit ), MAX_TX_ACCOUNT_LOCKS, 64UL );
-}
-
-/* https://github.com/anza-xyz/agave/blob/v2.0.9/sdk/src/transaction/sanitized.rs#L277-L289 */
+/* https://github.com/anza-xyz/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/accounts-db/src/account_locks.rs#L118 */
 int
 fd_executor_validate_account_locks( fd_exec_txn_ctx_t const * txn_ctx ) {
   /* Ensure the number of account keys does not exceed the transaction lock limit
-     https://github.com/anza-xyz/agave/blob/ced98f1ebe73f7e9691308afa757323003ff744f/sdk/src/transaction/sanitized.rs#L282-L283 */
-  ulong tx_account_lock_limit = get_transaction_account_lock_limit( txn_ctx );
+     https://github.com/anza-xyz/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/accounts-db/src/account_locks.rs#L123 */
+  ulong tx_account_lock_limit = get_transaction_account_lock_limit( txn_ctx->slot_ctx );
   if( FD_UNLIKELY( txn_ctx->accounts_cnt>tx_account_lock_limit ) ) {
     return FD_RUNTIME_TXN_ERR_TOO_MANY_ACCOUNT_LOCKS;
   }
 
   /* Duplicate account check
-     https://github.com/anza-xyz/agave/blob/ced98f1ebe73f7e9691308afa757323003ff744f/sdk/src/transaction/sanitized.rs#L284-L285 */
+     https://github.com/anza-xyz/agave/blob/838c1952595809a31520ff1603a13f2c9123aa51/accounts-db/src/account_locks.rs#L125 */
   for( ushort i=0; i<txn_ctx->accounts_cnt; i++ ) {
     for( ushort j=(ushort)(i+1U); j<txn_ctx->accounts_cnt; j++ ) {
       if( FD_UNLIKELY( !memcmp( &txn_ctx->accounts[i], &txn_ctx->accounts[j], sizeof(fd_pubkey_t) ) ) ) {
@@ -565,13 +623,131 @@ fd_should_set_exempt_rent_epoch_max( fd_exec_slot_ctx_t const * slot_ctx,
   return 1;
 }
 
+static void
+compute_priority_fee( fd_exec_txn_ctx_t const * txn_ctx,
+                      ulong *                   fee,
+                      ulong *                   priority ) {
+  switch( txn_ctx->prioritization_fee_type ) {
+  case FD_COMPUTE_BUDGET_PRIORITIZATION_FEE_TYPE_DEPRECATED: {
+    if( !txn_ctx->compute_unit_limit ) {
+      *priority = 0UL;
+    }
+    else {
+      uint128 micro_lamport_fee = (uint128)txn_ctx->compute_unit_price * (uint128)MICRO_LAMPORTS_PER_LAMPORT;
+      uint128 _priority         = micro_lamport_fee / (uint128)txn_ctx->compute_unit_limit;
+      *priority                 = _priority > (uint128)ULONG_MAX ? ULONG_MAX : (ulong)_priority;
+    }
+
+    *fee = txn_ctx->compute_unit_price;
+    return;
+
+  } case FD_COMPUTE_BUDGET_PRIORITIZATION_FEE_TYPE_COMPUTE_UNIT_PRICE: {
+    uint128 micro_lamport_fee = (uint128)txn_ctx->compute_unit_price * (uint128)txn_ctx->compute_unit_limit;
+    *priority                 = txn_ctx->compute_unit_price;
+    uint128 _fee              = (micro_lamport_fee + (uint128)(MICRO_LAMPORTS_PER_LAMPORT - 1)) / (uint128)(MICRO_LAMPORTS_PER_LAMPORT);
+    *fee                      = _fee > (uint128)ULONG_MAX ? ULONG_MAX : (ulong)_fee;
+    return;
+
+  }
+  default:
+    __builtin_unreachable();
+  }
+}
+
+static ulong
+fd_executor_lamports_per_signature( fd_slot_bank_t const *slot_bank ) {
+  // https://github.com/solana-labs/solana/blob/8f2c8b8388a495d2728909e30460aa40dcc5d733/sdk/program/src/fee_calculator.rs#L110
+  return slot_bank->fee_rate_governor.target_lamports_per_signature / 2;
+}
+
+static void
+fd_executor_calculate_fee( fd_exec_txn_ctx_t *txn_ctx,
+                          fd_txn_t const *txn_descriptor,
+                          fd_rawtxn_b_t const *txn_raw,
+                          ulong *ret_execution_fee,
+                          ulong *ret_priority_fee) {
+
+  // https://github.com/anza-xyz/agave/blob/2e6ca8c1f62db62c1db7f19c9962d4db43d0d550/sdk/src/fee.rs#L82
+  #define ACCOUNT_DATA_COST_PAGE_SIZE fd_ulong_sat_mul(32, 1024)
+
+  // https://github.com/firedancer-io/solana/blob/08a1ef5d785fe58af442b791df6c4e83fe2e7c74/runtime/src/bank.rs#L4443
+  ulong priority     = 0UL;
+  ulong priority_fee = 0UL;
+  compute_priority_fee( txn_ctx, &priority_fee, &priority );
+
+  // let signature_fee = Self::get_num_signatures_in_message(message) .saturating_mul(fee_structure.lamports_per_signature);
+  ulong num_signatures = txn_descriptor->signature_cnt;
+  for (ushort i=0; i<txn_descriptor->instr_cnt; ++i ) {
+    fd_txn_instr_t const * txn_instr  = &txn_descriptor->instr[i];
+    fd_pubkey_t *          program_id = &txn_ctx->accounts[txn_instr->program_id];
+    if( !memcmp(program_id->uc, fd_solana_keccak_secp_256k_program_id.key, sizeof(fd_pubkey_t)) ||
+        !memcmp(program_id->uc, fd_solana_ed25519_sig_verify_program_id.key, sizeof(fd_pubkey_t)) ||
+        (!memcmp(program_id->uc, fd_solana_secp256r1_program_id.key, sizeof(fd_pubkey_t)) && FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, enable_secp256r1_precompile )) ) {
+      if( !txn_instr->data_sz ) {
+        continue;
+      }
+      uchar * data   = (uchar *)txn_raw->raw + txn_instr->data_off;
+      num_signatures = fd_ulong_sat_add(num_signatures, (ulong)(data[0]));
+    }
+  }
+
+  ulong signature_fee = fd_executor_lamports_per_signature(&txn_ctx->slot_ctx->slot_bank) * num_signatures;
+
+  // TODO: as far as I can tell, this is always 0
+  //
+  //            let write_lock_fee = Self::get_num_write_locks_in_message(message)
+  //                .saturating_mul(fee_structure.lamports_per_write_lock);
+  ulong lamports_per_write_lock = 0UL;
+  ulong write_lock_fee          = fd_ulong_sat_mul(fd_txn_account_cnt(txn_descriptor, FD_TXN_ACCT_CAT_WRITABLE), lamports_per_write_lock);
+
+  // TODO: the fee_structure bin is static and default..
+  //        let loaded_accounts_data_size_cost = if include_loaded_account_data_size_in_fee {
+  //            FeeStructure::calculate_memory_usage_cost(
+  //                budget_limits.loaded_accounts_data_size_limit,
+  //                budget_limits.heap_cost,
+  //            )
+  //        } else {
+  //            0_u64
+  //        };
+  //        let total_compute_units =
+  //            loaded_accounts_data_size_cost.saturating_add(budget_limits.compute_unit_limit);
+  //        let compute_fee = self
+  //            .compute_fee_bins
+  //            .iter()
+  //            .find(|bin| total_compute_units <= bin.limit)
+  //            .map(|bin| bin.fee)
+  //            .unwrap_or_else(|| {
+  //                self.compute_fee_bins
+  //                    .last()
+  //                    .map(|bin| bin.fee)
+  //                    .unwrap_or_default()
+  //            });
+
+  // https://github.com/anza-xyz/agave/blob/2e6ca8c1f62db62c1db7f19c9962d4db43d0d550/sdk/src/fee.rs#L203-L206
+  ulong execution_fee = fd_ulong_sat_add( signature_fee, write_lock_fee );
+
+  if( execution_fee >= ULONG_MAX ) {
+    *ret_execution_fee = ULONG_MAX;
+  } else {
+    *ret_execution_fee = execution_fee;
+  }
+
+  if( priority_fee >= ULONG_MAX ) {
+    *ret_priority_fee = ULONG_MAX;
+  } else {
+    *ret_priority_fee = priority_fee;
+  }
+
+  #undef ACCOUNT_DATA_COST_PAGE_SIZE
+}
+
 static int
 fd_executor_collect_fees( fd_exec_txn_ctx_t * txn_ctx, fd_borrowed_account_t * fee_payer_rec ) {
 
   ulong execution_fee = 0UL;
   ulong priority_fee  = 0UL;
 
-  fd_runtime_calculate_fee( txn_ctx, txn_ctx->txn_descriptor, txn_ctx->_txn_raw, &execution_fee, &priority_fee );
+  fd_executor_calculate_fee( txn_ctx, txn_ctx->txn_descriptor, txn_ctx->_txn_raw, &execution_fee, &priority_fee );
 
   fd_epoch_bank_t * epoch_bank = fd_exec_epoch_ctx_epoch_bank( txn_ctx->slot_ctx->epoch_ctx );
   ulong             total_fee  = fd_ulong_sat_add( execution_fee, priority_fee );
@@ -626,7 +802,7 @@ fd_executor_validate_transaction_fee_payer( fd_exec_txn_ctx_t * txn_ctx ) {
 
   /* https://github.com/anza-xyz/agave/blob/16de8b75ebcd57022409b422de557dd37b1de8db/svm/src/transaction_processor.rs#L431-L436 */
   fd_borrowed_account_t * fee_payer_rec = NULL;
-  err = fd_txn_borrowed_account_modify_idx( txn_ctx, 0, 0UL, &fee_payer_rec );
+  err = fd_txn_borrowed_account_modify_fee_payer( txn_ctx, &fee_payer_rec );
   if( FD_UNLIKELY( err!=FD_ACC_MGR_SUCCESS ) ) {
     return FD_RUNTIME_TXN_ERR_ACCOUNT_NOT_FOUND;
   }
@@ -759,233 +935,6 @@ fd_executor_setup_accessed_accounts_for_txn( fd_exec_txn_ctx_t * txn_ctx ) {
   return FD_RUNTIME_EXECUTE_SUCCESS;
 }
 
-static void
-dump_sorted_features( const fd_features_t * features, fd_exec_test_feature_set_t * output_feature_set ) {
-  /* NOTE: Caller must have a scratch frame prepared */
-  uint64_t * unsorted_features = fd_scratch_alloc( alignof(uint64_t), FD_FEATURE_ID_CNT * sizeof(uint64_t) );
-  ulong num_features = 0;
-  for( const fd_feature_id_t * current_feature = fd_feature_iter_init(); !fd_feature_iter_done( current_feature ); current_feature = fd_feature_iter_next( current_feature ) ) {
-    if (features->f[current_feature->index] != FD_FEATURE_DISABLED) {
-      unsorted_features[num_features++] = (uint64_t) current_feature->id.ul[0];
-    }
-  }
-  // Sort the features
-  void * scratch = fd_scratch_alloc( sort_uint64_t_stable_scratch_align(), sort_uint64_t_stable_scratch_footprint(num_features) );
-  uint64_t * sorted_features = sort_uint64_t_stable_fast( unsorted_features, num_features, scratch );
-
-  // Set feature set in message
-  output_feature_set->features_count = (pb_size_t) num_features;
-  output_feature_set->features       = sorted_features;
-}
-
-static void
-dump_account_state( fd_borrowed_account_t const * borrowed_account,
-                      fd_exec_test_acct_state_t * output_account ) {
-    // Address
-    fd_memcpy(output_account->address, borrowed_account->pubkey, sizeof(fd_pubkey_t));
-
-    // Lamports
-    output_account->lamports = (uint64_t) borrowed_account->const_meta->info.lamports;
-
-    // Data
-    output_account->data = fd_scratch_alloc(alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(borrowed_account->const_meta->dlen));
-    output_account->data->size = (pb_size_t) borrowed_account->const_meta->dlen;
-    fd_memcpy(output_account->data->bytes, borrowed_account->const_data, borrowed_account->const_meta->dlen);
-
-    // Executable
-    output_account->executable = (bool) borrowed_account->const_meta->info.executable;
-
-    // Rent epoch
-    output_account->rent_epoch = (uint64_t) borrowed_account->const_meta->info.rent_epoch;
-
-    // Owner
-    fd_memcpy(output_account->owner, borrowed_account->const_meta->info.owner, sizeof(fd_pubkey_t));
-
-    // Seed address (not present)
-    output_account->has_seed_addr = false;
-}
-
-void
-fd_create_instr_context_protobuf_from_instructions( fd_exec_test_instr_context_t * instr_context,
-                                                 fd_exec_txn_ctx_t const *txn_ctx,
-                                                 fd_instr_info_t const *instr ) {
-  /*
-  NOTE: Calling this function requires the caller to have a scratch frame ready (see dump_instr_to_protobuf)
-  */
-
-  /* Prepare sysvar cache accounts */
-  fd_pubkey_t const fd_relevant_sysvar_ids[] = {
-    fd_sysvar_clock_id,
-    fd_sysvar_epoch_schedule_id,
-    fd_sysvar_epoch_rewards_id,
-    fd_sysvar_fees_id,
-    fd_sysvar_rent_id,
-    fd_sysvar_slot_hashes_id,
-    fd_sysvar_recent_block_hashes_id,
-    fd_sysvar_stake_history_id,
-    fd_sysvar_last_restart_slot_id,
-    fd_sysvar_instructions_id,
-  };
-  const ulong num_sysvar_entries = (sizeof(fd_relevant_sysvar_ids) / sizeof(fd_pubkey_t));
-
-  /* Program ID */
-  fd_memcpy( instr_context->program_id, instr->program_id_pubkey.uc, sizeof(fd_pubkey_t) );
-
-  /* Accounts */
-  instr_context->accounts_count = (pb_size_t) txn_ctx->accounts_cnt;
-  instr_context->accounts = fd_scratch_alloc(alignof(fd_exec_test_acct_state_t), (instr_context->accounts_count + num_sysvar_entries + txn_ctx->executable_cnt) * sizeof(fd_exec_test_acct_state_t));
-  for( ulong i = 0; i < txn_ctx->accounts_cnt; i++ ) {
-    // Copy account information over
-    fd_borrowed_account_t const * borrowed_account = &txn_ctx->borrowed_accounts[i];
-    fd_exec_test_acct_state_t * output_account = &instr_context->accounts[i];
-    dump_account_state( borrowed_account, output_account );
-  }
-
-  /* Add sysvar cache variables */
-  for( ulong i = 0; i < num_sysvar_entries; i++ ) {
-    FD_BORROWED_ACCOUNT_DECL(borrowed_account);
-    int ret = fd_acc_mgr_view( txn_ctx->acc_mgr, txn_ctx->funk_txn, &fd_relevant_sysvar_ids[i], borrowed_account );
-    if( ret != FD_ACC_MGR_SUCCESS ) {
-      continue;
-    }
-    // Make sure the account doesn't exist in the output accounts yet
-    int account_exists = 0;
-    for( ulong j = 0; j < txn_ctx->accounts_cnt; j++ ) {
-      if ( 0 == memcmp( txn_ctx->accounts[j].key, fd_relevant_sysvar_ids[i].uc, sizeof(fd_pubkey_t) ) ) {
-        account_exists = true;
-        break;
-      }
-    }
-
-    // Copy it into output
-    if (!account_exists) {
-      fd_exec_test_acct_state_t * output_account = &instr_context->accounts[instr_context->accounts_count++];
-      dump_account_state( borrowed_account, output_account );
-    }
-  }
-
-  /* Add executable accounts */
-  for( ulong i = 0; i < txn_ctx->executable_cnt; i++ ) {
-    FD_BORROWED_ACCOUNT_DECL(borrowed_account);
-    int ret = fd_acc_mgr_view( txn_ctx->acc_mgr, txn_ctx->funk_txn, txn_ctx->executable_accounts[i].pubkey, borrowed_account );
-    if( ret != FD_ACC_MGR_SUCCESS ) {
-      continue;
-    }
-    // Make sure the account doesn't exist in the output accounts yet
-    bool account_exists = false;
-    for( ulong j = 0; j < instr_context->accounts_count; j++ ) {
-      if( 0 == memcmp( instr_context->accounts[j].address, txn_ctx->executable_accounts[i].pubkey->uc, sizeof(fd_pubkey_t) ) ) {
-        account_exists = true;
-        break;
-      }
-    }
-    // Copy it into output
-    if( !account_exists ) {
-      fd_exec_test_acct_state_t * output_account = &instr_context->accounts[instr_context->accounts_count++];
-      dump_account_state( borrowed_account, output_account );
-    }
-  }
-
-  /* Instruction Accounts */
-  instr_context->instr_accounts_count = (pb_size_t) instr->acct_cnt;
-  instr_context->instr_accounts = fd_scratch_alloc( alignof(fd_exec_test_instr_acct_t), instr_context->instr_accounts_count * sizeof(fd_exec_test_instr_acct_t) );
-  for( ushort i = 0; i < instr->acct_cnt; i++ ) {
-    fd_exec_test_instr_acct_t * output_instr_account = &instr_context->instr_accounts[i];
-
-    uchar account_flag = instr->acct_flags[i];
-    bool is_writable = account_flag & FD_INSTR_ACCT_FLAGS_IS_WRITABLE;
-    bool is_signer = account_flag & FD_INSTR_ACCT_FLAGS_IS_SIGNER;
-
-    output_instr_account->index = instr->acct_txn_idxs[i];
-    output_instr_account->is_writable = is_writable;
-    output_instr_account->is_signer = is_signer;
-  }
-
-  /* Data */
-  instr_context->data = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(instr->data_sz) );
-  instr_context->data->size = (pb_size_t) instr->data_sz;
-  fd_memcpy( instr_context->data->bytes, instr->data, instr->data_sz );
-
-  /* Compute Units */
-  instr_context->cu_avail = txn_ctx->compute_meter;
-
-  /* Slot Context */
-  instr_context->has_slot_context = true;
-
-  /* Epoch Context */
-  instr_context->has_epoch_context = true;
-  instr_context->epoch_context.has_features = true;
-  dump_sorted_features( &txn_ctx->epoch_ctx->features, &instr_context->epoch_context.features );
-}
-
-/*  This function dumps individual instructions from a ledger replay.
-
-    The following arguments can be added when replaying ledger transactions:
-      --dump-insn-to-pb <0/1>
-        * If enabled, instructions will be dumped to the specified output directory
-      --dump-proto-sig-filter <base_58_enc_sig>
-        * If enabled, only instructions with the specified transaction signature will be dumped
-        * Provided signature must be base58-encoded
-        * Default behavior if signature filter is not provided is to dump EVERY instruction
-      --dump-proto-output-dir <output_dir>
-        * Each file represents a single instruction as a serialized InstrContext Protobuf message
-        * File name format is "instr-<base58_enc_sig>-<instruction_idx>.bin", where instruction_idx is 1-indexed
-
-    solana-conformance (https://github.com/firedancer-io/solana-conformance)
-      * Allows decoding / debugging of instructions in an isolated environment
-      * Allows execution result(s) comparison with Solana / Agave
-      * See solana-conformance/README.md for functionality and use cases
-*/
-static void
-dump_instr_to_protobuf( fd_exec_txn_ctx_t *txn_ctx,
-                        fd_instr_info_t *instr,
-                        ushort instruction_idx ) {
-
-
-  FD_SCRATCH_SCOPE_BEGIN {
-    // Get base58-encoded tx signature
-    const fd_ed25519_sig_t * signatures = fd_txn_get_signatures( txn_ctx->txn_descriptor, txn_ctx->_txn_raw->raw );
-    fd_ed25519_sig_t signature; fd_memcpy( signature, signatures[0], sizeof(fd_ed25519_sig_t) );
-    char encoded_signature[FD_BASE58_ENCODED_64_SZ];
-    ulong out_size;
-    fd_base58_encode_64( signature, &out_size, encoded_signature );
-
-    if (txn_ctx->capture_ctx->dump_proto_sig_filter) {
-      ulong filter_strlen = (ulong) strlen(txn_ctx->capture_ctx->dump_proto_sig_filter);
-
-      // Terminate early if the signature does not match
-      if( memcmp( txn_ctx->capture_ctx->dump_proto_sig_filter, encoded_signature, filter_strlen < out_size ? filter_strlen : out_size ) ) {
-        return;
-      }
-    }
-
-    fd_exec_test_instr_context_t instr_context = FD_EXEC_TEST_INSTR_CONTEXT_INIT_DEFAULT;
-    fd_create_instr_context_protobuf_from_instructions( &instr_context, txn_ctx, instr );
-
-    /* Output to file */
-    ulong out_buf_size = 100 * 1024 * 1024;
-    uint8_t * out = fd_scratch_alloc( alignof(uchar) , out_buf_size );
-    pb_ostream_t stream = pb_ostream_from_buffer( out, out_buf_size );
-    if (pb_encode(&stream, FD_EXEC_TEST_INSTR_CONTEXT_FIELDS, &instr_context)) {
-      char output_filepath[256]; fd_memset(output_filepath, 0, sizeof(output_filepath));
-      char * position = fd_cstr_init(output_filepath);
-      position = fd_cstr_append_cstr(position, txn_ctx->capture_ctx->dump_proto_output_dir);
-      position = fd_cstr_append_cstr(position, "/instr-");
-      position = fd_cstr_append_cstr(position, encoded_signature);
-      position = fd_cstr_append_cstr(position, "-");
-      position = fd_cstr_append_ushort_as_text(position, '0', 0, instruction_idx, 3); // Assume max 3 digits
-      position = fd_cstr_append_cstr(position, ".bin");
-      fd_cstr_fini(position);
-
-      FILE * file = fopen(output_filepath, "wb");
-      if( file ) {
-        fwrite( out, 1, stream.bytes_written, file );
-        fclose( file );
-      }
-    }
-  } FD_SCRATCH_SCOPE_END;
-}
-
 /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L319-L357 */
 static inline int
 fd_txn_ctx_push( fd_exec_txn_ctx_t * txn_ctx,
@@ -1000,6 +949,31 @@ fd_txn_ctx_push( fd_exec_txn_ctx_t * txn_ctx,
   }
   instr->starting_lamports_h = starting_lamports_h;
   instr->starting_lamports_l = starting_lamports_l;
+
+  /* Check that the caller's lamport sum has not changed.
+     https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L329-L340 */
+  if( txn_ctx->instr_stack_sz>0 ) {
+    /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L330 */
+    fd_exec_instr_ctx_t const * caller_instruction_context = &txn_ctx->instr_stack[ txn_ctx->instr_stack_sz-1 ];
+
+    /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L331-L332 */
+    ulong original_caller_lamport_sum_h = caller_instruction_context->instr->starting_lamports_h;
+    ulong original_caller_lamport_sum_l = caller_instruction_context->instr->starting_lamports_l;
+
+    /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L333-L334 */
+    ulong current_caller_lamport_sum_h = 0UL;
+    ulong current_caller_lamport_sum_l = 0UL;
+    int err = fd_instr_info_sum_account_lamports( caller_instruction_context->instr, &current_caller_lamport_sum_h, &current_caller_lamport_sum_l );
+    if( FD_UNLIKELY( err ) ) {
+      return err;
+    }
+
+    /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L335-L339 */
+    if( FD_UNLIKELY( current_caller_lamport_sum_h!=original_caller_lamport_sum_h || 
+                     current_caller_lamport_sum_l!=original_caller_lamport_sum_l ) ) {
+      return FD_EXECUTOR_INSTR_ERR_UNBALANCED_INSTR;
+    }
+  }
 
   /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/sdk/src/transaction_context.rs#L347-L351 */
   if( FD_UNLIKELY( txn_ctx->instr_trace_length>=FD_MAX_INSTRUCTION_TRACE_LENGTH ) ) {
@@ -1024,6 +998,17 @@ fd_txn_ctx_push( fd_exec_txn_ctx_t * txn_ctx,
 int
 fd_instr_stack_push( fd_exec_txn_ctx_t *     txn_ctx,
                      fd_instr_info_t *       instr ) {
+  /* Agave keeps a vector of vectors called program_indices that stores the program_id index for each instruction within the transaction.
+     https://github.com/anza-xyz/agave/blob/v2.1.7/svm/src/account_loader.rs#L347-L402
+     If and only if the program_id is the native loader, then the vector for respective specific instruction (account_indices) is empty.
+     https://github.com/anza-xyz/agave/blob/v2.1.7/svm/src/account_loader.rs#L350-L358
+     While trying to push a new instruction onto the instruction stack, if the vector for the respective instruction is empty, Agave throws UnsupportedProgramId 
+     https://github.com/anza-xyz/agave/blob/v2.1.7/program-runtime/src/invoke_context.rs#L253-L255
+     The only way for the vector to be empty is if the program_id is the native loader, so we can a program_id check here
+     */
+  if( FD_UNLIKELY( !memcmp(instr->program_id_pubkey.key, fd_solana_native_loader_id.key, sizeof(fd_pubkey_t)) ) ) {
+    return FD_EXECUTOR_INSTR_ERR_UNSUPPORTED_PROGRAM_ID;
+  }
   /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/program-runtime/src/invoke_context.rs#L256-L286 */
   if( txn_ctx->instr_stack_sz ) {
     /* https://github.com/anza-xyz/agave/blob/c4b42ab045860d7b13b3912eafb30e6d2f4e593f/program-runtime/src/invoke_context.rs#L261-L285 */
@@ -1093,6 +1078,7 @@ fd_instr_stack_pop( fd_exec_txn_ctx_t *       txn_ctx,
 int
 fd_execute_instr( fd_exec_txn_ctx_t * txn_ctx,
                   fd_instr_info_t *   instr ) {
+  FD_RUNTIME_TXN_SPAD_FRAME_BEGIN( txn_ctx->spad, txn_ctx ) {
   FD_SCRATCH_SCOPE_BEGIN {
     fd_exec_instr_ctx_t * parent = NULL;
     if( txn_ctx->instr_stack_sz ) {
@@ -1111,7 +1097,6 @@ fd_execute_instr( fd_exec_txn_ctx_t * txn_ctx,
       .txn_ctx   = txn_ctx,
       .epoch_ctx = txn_ctx->epoch_ctx,
       .slot_ctx  = txn_ctx->slot_ctx,
-      .valloc    = fd_scratch_virtual(),
       .acc_mgr   = txn_ctx->acc_mgr,
       .funk_txn  = txn_ctx->funk_txn,
       .parent    = parent,
@@ -1175,6 +1160,7 @@ fd_execute_instr( fd_exec_txn_ctx_t * txn_ctx,
 
     return exec_result;
   } FD_SCRATCH_SCOPE_END;
+  } FD_RUNTIME_TXN_SPAD_FRAME_END;
 }
 
 void
@@ -1237,9 +1223,16 @@ fd_executor_setup_borrowed_accounts_for_txn( fd_exec_txn_ctx_t * txn_ctx ) {
     }
     uchar is_unknown_account = err==FD_ACC_MGR_ERR_UNKNOWN_ACCOUNT;
     memcpy( borrowed_account->pubkey->key, acc, sizeof(fd_pubkey_t) );
+    if ( FD_UNLIKELY( is_unknown_account ) ) {
+      borrowed_account->account_found = 0;
+    }
 
-    if( fd_txn_account_is_writable_idx( txn_ctx, (int)i ) ) {
-      void * borrowed_account_data = fd_spad_alloc( txn_ctx->spad, FD_SPAD_ALIGN, FD_ACC_TOT_SZ_MAX );
+    /* Create a borrowed account for all writable accounts and the fee payer
+       account which is almost always writable, but doesn't have to be.
+
+       TODO: The borrowed account semantics should better match Agave's. */
+    if( fd_txn_account_is_writable_idx( txn_ctx, (int)i ) || i==FD_FEE_PAYER_TXN_IDX ) {
+      void * borrowed_account_data = fd_spad_alloc( txn_ctx->spad, FD_ACCOUNT_REC_ALIGN, FD_ACC_TOT_SZ_MAX );
       fd_borrowed_account_make_modifiable( borrowed_account, borrowed_account_data );
 
       /* All new accounts should have their rent epoch set to ULONG_MAX.
@@ -1340,475 +1333,10 @@ fd_executor_txn_verify( fd_exec_txn_ctx_t * txn_ctx ) {
 }
 
 int
-fd_execute_txn_prepare_phase3( fd_exec_slot_ctx_t * slot_ctx,
-                               fd_exec_txn_ctx_t *  txn_ctx,
-                               fd_txn_p_t *         txn ) {
-  /* TODO: These checks should be moved to phase2. */
-
-  if (FD_FEATURE_ACTIVE( txn_ctx->slot_ctx, apply_cost_tracker_during_replay ) ) {
-    ulong est_cost = fd_pack_compute_cost( TXN(txn), txn->payload, &txn->flags, NULL, NULL, NULL );
-    if( slot_ctx->total_compute_units_requested + est_cost <= MAX_COMPUTE_UNITS_PER_BLOCK ) {
-      slot_ctx->total_compute_units_requested += est_cost;
-    } else {
-      return FD_RUNTIME_TXN_ERR_WOULD_EXCEED_MAX_BLOCK_COST_LIMIT;
-    }
-
-    fd_pubkey_t * tx_accs   = txn_ctx->accounts;
-    for( fd_txn_acct_iter_t ctrl = fd_txn_acct_iter_init( txn_ctx->txn_descriptor, FD_TXN_ACCT_CAT_WRITABLE & FD_TXN_ACCT_CAT_IMM );
-         ctrl != fd_txn_acct_iter_end(); ctrl=fd_txn_acct_iter_next( ctrl ) ) {
-      ulong i = fd_txn_acct_iter_idx( ctrl );
-      fd_pubkey_t * acct = &tx_accs[i];
-      if (!fd_txn_account_is_writable_idx( txn_ctx, (int)i )) {
-        continue;
-      }
-      fd_account_compute_elem_t * elem = fd_account_compute_table_query( slot_ctx->account_compute_table, acct, NULL );
-      if ( !elem ) {
-        elem = fd_account_compute_table_insert( slot_ctx->account_compute_table, acct );
-        elem->cu_consumed = 0;
-      }
-
-      if ( elem->cu_consumed + est_cost > MAX_COMPUTE_UNITS_PER_WRITE_LOCKED_ACCOUNT ) {
-        return FD_RUNTIME_TXN_ERR_WOULD_EXCEED_MAX_ACCOUNT_COST_LIMIT;
-      }
-
-      elem->cu_consumed += est_cost;
-    }
-  }
-
-  return 0;
-}
-
-/* Stuff to be done after multithreading ends */
-int
-fd_execute_txn_finalize( fd_exec_txn_ctx_t * txn_ctx,
-                         int exec_txn_err ) {
-  if( exec_txn_err != 0 ) {
-    for( ulong i = 0; i < txn_ctx->accounts_cnt; i++ ) {
-      fd_borrowed_account_t * acc_rec = &txn_ctx->borrowed_accounts[i];
-      void * acc_rec_data = fd_borrowed_account_destroy( acc_rec );
-      if( acc_rec_data != NULL ) {
-        fd_valloc_free( txn_ctx->valloc, acc_rec_data );
-      }
-    }
-
-    // fd_funk_txn_cancel( slot_ctx->acc_mgr->funk, txn_ctx->funk_txn, 0 );
-    return 0;
-  }
-
-  for( ulong i = 0; i < txn_ctx->accounts_cnt; i++ ) {
-    if( !fd_txn_account_is_writable_idx( txn_ctx, (int)i ) ) {
-      continue;
-    }
-
-    fd_borrowed_account_t * acc_rec = &txn_ctx->borrowed_accounts[i];
-
-    int ret = fd_acc_mgr_save_non_tpool( txn_ctx->acc_mgr, txn_ctx->funk_txn, acc_rec );
-    if( ret != FD_ACC_MGR_SUCCESS ) {
-      FD_LOG_ERR(( "failed to save edits to accounts" ));
-      return -1;
-    }
-
-    void * borrow_account_data = fd_borrowed_account_destroy( acc_rec );
-    if( borrow_account_data != NULL ) {
-      fd_valloc_free( txn_ctx->valloc, borrow_account_data );
-    }
-  }
-
-  return 0;
-}
-
-/* Creates a TxnContext Protobuf message from a provided txn_ctx.
-   - The transaction is assumed to have just finished phase 1 of preparation
-   - Caller of this function should have a scratch frame ready
-*/
-static void
-create_txn_context_protobuf_from_txn( fd_exec_test_txn_context_t * txn_context_msg,
-                                      fd_exec_txn_ctx_t *          txn_ctx,
-                                      fd_spad_t *                  spad ) {
-  fd_txn_t const * txn_descriptor = txn_ctx->txn_descriptor;
-  uchar const * txn_payload = (uchar const *) txn_ctx->_txn_raw->raw;
-  fd_exec_slot_ctx_t const * slot_ctx = txn_ctx->slot_ctx;
-
-  /* We don't want to store builtins in account shared data */
-  fd_pubkey_t const loaded_builtins[] = {
-    fd_solana_system_program_id,
-    fd_solana_vote_program_id,
-    fd_solana_stake_program_id,
-    fd_solana_config_program_id,
-    // fd_solana_zk_token_proof_program_id,
-    fd_solana_bpf_loader_v4_program_id,
-    fd_solana_address_lookup_table_program_id,
-    fd_solana_bpf_loader_deprecated_program_id,
-    fd_solana_bpf_loader_program_id,
-    fd_solana_bpf_loader_upgradeable_program_id,
-    fd_solana_compute_budget_program_id,
-    fd_solana_keccak_secp_256k_program_id,
-    fd_solana_ed25519_sig_verify_program_id,
-    fd_solana_zk_elgamal_proof_program_id,
-    fd_solana_ed25519_sig_verify_program_id,
-    fd_solana_spl_native_mint_id,
-  };
-  const ulong num_loaded_builtins = (sizeof(loaded_builtins) / sizeof(fd_pubkey_t));
-
-  /* Prepare sysvar cache accounts */
-  fd_pubkey_t const fd_relevant_sysvar_ids[] = {
-    fd_sysvar_clock_id,
-    fd_sysvar_epoch_schedule_id,
-    fd_sysvar_epoch_rewards_id,
-    fd_sysvar_fees_id,
-    fd_sysvar_rent_id,
-    fd_sysvar_slot_hashes_id,
-    fd_sysvar_recent_block_hashes_id,
-    fd_sysvar_stake_history_id,
-    fd_sysvar_last_restart_slot_id,
-    fd_sysvar_instructions_id,
-  };
-  const ulong num_sysvar_entries = (sizeof(fd_relevant_sysvar_ids) / sizeof(fd_pubkey_t));
-
-  /* Transaction Context -> tx */
-  txn_context_msg->has_tx = true;
-  fd_exec_test_sanitized_transaction_t * sanitized_transaction = &txn_context_msg->tx;
-
-  /* Transaction Context -> tx -> message */
-  sanitized_transaction->has_message = true;
-  fd_exec_test_transaction_message_t * message = &sanitized_transaction->message;
-
-  /* Transaction Context -> tx -> message -> is_legacy */
-  message->is_legacy = txn_descriptor->transaction_version == FD_TXN_VLEGACY;
-
-  /* Transaction Context -> tx -> message -> header */
-  message->has_header = true;
-  fd_exec_test_message_header_t * header = &message->header;
-
-  /* Transaction Context -> tx -> message -> header -> num_required_signatures */
-  header->num_required_signatures = txn_descriptor->signature_cnt;
-
-  /* Transaction Context -> tx -> message -> header -> num_readonly_signed_accounts */
-  header->num_readonly_signed_accounts = txn_descriptor->readonly_signed_cnt;
-
-  /* Transaction Context -> tx -> message -> header -> num_readonly_unsigned_accounts */
-  header->num_readonly_unsigned_accounts = txn_descriptor->readonly_unsigned_cnt;
-
-  /* Transaction Context -> tx -> message -> account_keys */
-  message->account_keys_count = txn_descriptor->acct_addr_cnt;
-  message->account_keys = fd_scratch_alloc( alignof(pb_bytes_array_t *), PB_BYTES_ARRAY_T_ALLOCSIZE(txn_descriptor->acct_addr_cnt * sizeof(pb_bytes_array_t *)) );
-  fd_acct_addr_t const * account_keys = fd_txn_get_acct_addrs( txn_descriptor, txn_payload );
-  for( ulong i = 0; i < txn_descriptor->acct_addr_cnt; i++ ) {
-    pb_bytes_array_t * account_key = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(sizeof(fd_pubkey_t)) );
-    account_key->size = sizeof(fd_pubkey_t);
-    memcpy( account_key->bytes, &account_keys[i], sizeof(fd_pubkey_t) );
-    message->account_keys[i] = account_key;
-  }
-
-  /* Transaction Context -> tx -> message -> account_shared_data
-     Contains:
-      - Account data for regular accounts
-      - Account data for LUT accounts
-      - Account data for executable accounts
-      - Account data for (almost) all sysvars
-  */
-  // Dump regular accounts first
-  message->account_shared_data_count = 0;
-  message->account_shared_data = fd_scratch_alloc( alignof(fd_exec_test_acct_state_t),
-                                                   (txn_ctx->accounts_cnt * 2 + txn_descriptor->addr_table_lookup_cnt + num_sysvar_entries) * sizeof(fd_exec_test_acct_state_t) );
-  for( ulong i = 0; i < txn_ctx->accounts_cnt; ++i ) {
-    FD_BORROWED_ACCOUNT_DECL(borrowed_account);
-    int ret = fd_acc_mgr_view( slot_ctx->acc_mgr, slot_ctx->funk_txn, &txn_ctx->accounts[i], borrowed_account );
-    if( FD_UNLIKELY(ret != FD_ACC_MGR_SUCCESS) ) {
-      continue;
-    }
-
-    // Make sure account is not a builtin
-    bool is_builtin = false;
-    for( ulong j = 0; j < num_loaded_builtins; ++j ) {
-      if( 0 == memcmp( &txn_ctx->accounts[i], &loaded_builtins[j], sizeof(fd_pubkey_t) ) ) {
-        is_builtin = true;
-        break;
-      }
-    }
-    if( !is_builtin ) {
-      dump_account_state( borrowed_account, &message->account_shared_data[message->account_shared_data_count++] );
-    }
-  }
-
-  // For executable accounts, we need to set up dummy borrowed accounts by cluttering txn ctx state and resetting it after
-  // TODO: Revisit this hacky approach
-  txn_ctx->spad = spad;
-  fd_spad_push( txn_ctx->spad );
-  txn_ctx->funk_txn = slot_ctx->funk_txn;
-  fd_executor_setup_borrowed_accounts_for_txn( txn_ctx );
-
-  // Dump executable accounts
-  for( ulong i = 0; i < txn_ctx->executable_cnt; ++i ) {
-    if( !txn_ctx->executable_accounts[i].const_meta ) {
-      continue;
-    }
-    dump_account_state( &txn_ctx->executable_accounts[i], &message->account_shared_data[message->account_shared_data_count++] );
-  }
-
-  // Reset state
-  txn_ctx->funk_txn = NULL;
-  txn_ctx->executable_cnt = 0;
-  fd_spad_pop( txn_ctx->spad );
-
-  // Dump LUT accounts
-  fd_txn_acct_addr_lut_t const * address_lookup_tables = fd_txn_get_address_tables_const( txn_descriptor );
-  for( ulong i = 0; i < txn_descriptor->addr_table_lookup_cnt; ++i ) {
-    FD_BORROWED_ACCOUNT_DECL(borrowed_account);
-    fd_pubkey_t * alut_key = (fd_pubkey_t *) (txn_payload + address_lookup_tables[i].addr_off);
-    int ret = fd_acc_mgr_view( slot_ctx->acc_mgr, slot_ctx->funk_txn, alut_key, borrowed_account );
-    if( FD_UNLIKELY(ret != FD_ACC_MGR_SUCCESS) ) {
-      continue;
-    }
-    dump_account_state( borrowed_account, &message->account_shared_data[message->account_shared_data_count++] );
-  }
-
-  // Dump sysvars
-  for( ulong i = 0; i < num_sysvar_entries; i++ ) {
-    FD_BORROWED_ACCOUNT_DECL(borrowed_account);
-    int ret = fd_acc_mgr_view( slot_ctx->acc_mgr, slot_ctx->funk_txn, &fd_relevant_sysvar_ids[i], borrowed_account );
-    if( ret != FD_ACC_MGR_SUCCESS ) {
-      continue;
-    }
-
-    // Make sure the account doesn't exist in the output accounts yet
-    int account_exists = 0;
-    for( ulong j = 0; j < txn_ctx->accounts_cnt; j++ ) {
-      if ( 0 == memcmp( txn_ctx->accounts[j].key, fd_relevant_sysvar_ids[i].uc, sizeof(fd_pubkey_t) ) ) {
-        account_exists = true;
-        break;
-      }
-    }
-    // Copy it into output
-    if (!account_exists) {
-      dump_account_state( borrowed_account, &message->account_shared_data[message->account_shared_data_count++] );
-    }
-  }
-
-  /* Transaction Context -> tx -> message -> recent_blockhash */
-  uchar const * recent_blockhash = fd_txn_get_recent_blockhash( txn_descriptor, txn_payload );
-  message->recent_blockhash = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(sizeof(fd_hash_t)) );
-  message->recent_blockhash->size = sizeof(fd_hash_t);
-  memcpy( message->recent_blockhash->bytes, recent_blockhash, sizeof(fd_hash_t) );
-
-  /* Transaction Context -> tx -> message -> instructions */
-  message->instructions_count = txn_descriptor->instr_cnt;
-  message->instructions = fd_scratch_alloc( alignof(fd_exec_test_compiled_instruction_t), txn_descriptor->instr_cnt * sizeof(fd_exec_test_compiled_instruction_t) );
-  for( ulong i = 0; i < txn_descriptor->instr_cnt; ++i ) {
-    fd_txn_instr_t instr = txn_descriptor->instr[i];
-    fd_exec_test_compiled_instruction_t * compiled_instruction = &message->instructions[i];
-
-    // compiled instruction -> program_id_index
-    compiled_instruction->program_id_index = instr.program_id;
-
-    // compiled instruction -> accounts
-    compiled_instruction->accounts_count = instr.acct_cnt;
-    compiled_instruction->accounts = fd_scratch_alloc( alignof(uint32_t), instr.acct_cnt * sizeof(uint32_t) );
-    uchar const * instr_accounts = fd_txn_get_instr_accts( &instr, txn_payload );
-    for( ulong j = 0; j < instr.acct_cnt; ++j ) {
-      uchar instr_acct_index = instr_accounts[j];
-      compiled_instruction->accounts[j] = instr_acct_index;
-    }
-
-    // compiled instruction -> data
-    uchar const * instr_data = fd_txn_get_instr_data( &instr, txn_payload );
-    compiled_instruction->data = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(instr.data_sz) );
-    compiled_instruction->data->size = instr.data_sz;
-    memcpy( compiled_instruction->data->bytes, instr_data, instr.data_sz );
-  }
-
-  /* ALUT stuff (non-legacy) */
-  message->address_table_lookups_count = 0;
-  if( !message->is_legacy ) {
-    /* Transaction Context -> tx -> message -> address_table_lookups */
-    message->address_table_lookups_count = txn_descriptor->addr_table_lookup_cnt;
-    message->address_table_lookups = fd_scratch_alloc( alignof(fd_exec_test_message_address_table_lookup_t),
-                                                       txn_descriptor->addr_table_lookup_cnt * sizeof(fd_exec_test_message_address_table_lookup_t) );
-    for( ulong i = 0; i < txn_descriptor->addr_table_lookup_cnt; ++i ) {
-      // alut -> account_key
-      fd_pubkey_t * alut_key = (fd_pubkey_t *) (txn_payload + address_lookup_tables[i].addr_off);
-      memcpy( message->address_table_lookups[i].account_key, alut_key, sizeof(fd_pubkey_t) );
-
-      // Access ALUT account data to access its keys
-      FD_BORROWED_ACCOUNT_DECL(addr_lut_rec);
-      int err = fd_acc_mgr_view(slot_ctx->acc_mgr, slot_ctx->funk_txn, alut_key, addr_lut_rec);
-      if( FD_UNLIKELY( err != FD_ACC_MGR_SUCCESS ) ) {
-        FD_LOG_ERR(( "addr lut not found" ));
-      }
-
-      // alut -> writable_indexes
-      message->address_table_lookups[i].writable_indexes_count = address_lookup_tables[i].writable_cnt;
-      message->address_table_lookups[i].writable_indexes = fd_scratch_alloc( alignof(uint32_t), address_lookup_tables[i].writable_cnt * sizeof(uint32_t) );
-      uchar * writable_indexes = (uchar *) (txn_payload + address_lookup_tables[i].writable_off);
-      for( ulong j = 0; j < address_lookup_tables[i].writable_cnt; ++j ) {
-        message->address_table_lookups[i].writable_indexes[j] = writable_indexes[j];
-      }
-
-      // alut -> readonly_indexes
-      message->address_table_lookups[i].readonly_indexes_count = address_lookup_tables[i].readonly_cnt;
-      message->address_table_lookups[i].readonly_indexes = fd_scratch_alloc( alignof(uint32_t), address_lookup_tables[i].readonly_cnt * sizeof(uint32_t) );
-      uchar * readonly_indexes = (uchar *) (txn_payload + address_lookup_tables[i].readonly_off);
-      for( ulong j = 0; j < address_lookup_tables[i].readonly_cnt; ++j ) {
-        message->address_table_lookups[i].readonly_indexes[j] = readonly_indexes[j];
-      }
-    }
-  }
-
-  /* Transaction Context -> tx -> message_hash */
-  // Skip because it does not matter what's in here
-
-  /* Transaction Context -> tx -> is_simple_vote_tx */
-  // Doesn't matter for FD, but does for Agave
-  // https://github.com/anza-xyz/agave/blob/9a7bf72940f4b3cd7fc94f54e005868ce707d53d/sdk/src/simple_vote_transaction_checker.rs#L5-L9
-  sanitized_transaction->is_simple_vote_tx = ( txn_descriptor->signature_cnt < 3 )
-                                          && ( message->is_legacy )
-                                          && ( txn_descriptor->instr_cnt == 1 )
-                                          && ( 0 == memcmp( &txn_ctx->accounts[txn_descriptor->instr[0].program_id], fd_solana_vote_program_id.key, sizeof(fd_pubkey_t) ) );
-
-  /* Transaction Context -> tx -> signatures */
-  sanitized_transaction->signatures_count = txn_descriptor->signature_cnt;
-  sanitized_transaction->signatures = fd_scratch_alloc( alignof(pb_bytes_array_t *), PB_BYTES_ARRAY_T_ALLOCSIZE(txn_descriptor->signature_cnt * sizeof(pb_bytes_array_t *)) );
-  fd_ed25519_sig_t const * signatures = fd_txn_get_signatures( txn_descriptor, txn_payload );
-  for( uchar i = 0; i < txn_descriptor->signature_cnt; ++i ) {
-    pb_bytes_array_t * signature = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(sizeof(fd_ed25519_sig_t)) );
-    signature->size = sizeof(fd_ed25519_sig_t);
-    memcpy( signature->bytes, &signatures[i], sizeof(fd_ed25519_sig_t) );
-    sanitized_transaction->signatures[i] = signature;
-  }
-
-  /* Transaction Context -> blockhash_queue
-     NOTE: Agave's implementation of register_hash incorrectly allows the blockhash queue to hold max_age + 1 (max 301)
-     entries. We have this incorrect logic implemented in fd_sysvar_recent_hashes:register_blockhash and it's not a
-     huge issue, but something to keep in mind. */
-  pb_bytes_array_t ** output_blockhash_queue = fd_scratch_alloc(
-                                                      alignof(pb_bytes_array_t *),
-                                                      PB_BYTES_ARRAY_T_ALLOCSIZE((FD_BLOCKHASH_QUEUE_MAX_ENTRIES + 1) * sizeof(pb_bytes_array_t *)) );
-  txn_context_msg->blockhash_queue_count = 0;
-  txn_context_msg->blockhash_queue = output_blockhash_queue;
-
-  // Iterate over all block hashes in the queue and save them
-  fd_block_hash_queue_t const * queue = &slot_ctx->slot_bank.block_hash_queue;
-  fd_hash_hash_age_pair_t_mapnode_t * nn;
-  for ( fd_hash_hash_age_pair_t_mapnode_t * n = fd_hash_hash_age_pair_t_map_minimum( queue->ages_pool, queue->ages_root ); n; n = nn ) {
-    nn = fd_hash_hash_age_pair_t_map_successor( queue->ages_pool, n );
-
-    /* Get the index in the blockhash queue
-       - Lower index = newer
-       - 0 will be the most recent blockhash
-       - Index range is [0, max_age] (not a typo) */
-    ulong queue_index = queue->last_hash_index - n->elem.val.hash_index;
-    fd_hash_t blockhash = n->elem.key;
-
-    // Write the blockhash to the correct index (note we write in reverse order since in the Protobuf message, the oldest blockhash goes first)
-    pb_bytes_array_t * output_blockhash = fd_scratch_alloc( alignof(pb_bytes_array_t), PB_BYTES_ARRAY_T_ALLOCSIZE(sizeof(fd_hash_t)) );
-    output_blockhash->size = sizeof(fd_hash_t);
-    memcpy( output_blockhash->bytes, &blockhash, sizeof(fd_hash_t) );
-    output_blockhash_queue[FD_BLOCKHASH_QUEUE_MAX_ENTRIES - queue_index] = output_blockhash;
-    txn_context_msg->blockhash_queue_count++;
-  }
-
-  // Shift blockhash queue elements if num elements < 301
-  if( txn_context_msg->blockhash_queue_count < FD_BLOCKHASH_QUEUE_MAX_ENTRIES + 1 ) {
-    ulong index_offset = FD_BLOCKHASH_QUEUE_MAX_ENTRIES + 1 - txn_context_msg->blockhash_queue_count;
-    for( ulong i = 0; i < txn_context_msg->blockhash_queue_count; i++ ) {
-      output_blockhash_queue[i] = output_blockhash_queue[i + index_offset];
-    }
-  }
-
-  /* Transaction Context -> epoch_ctx */
-  txn_context_msg->has_epoch_ctx = true;
-  txn_context_msg->epoch_ctx.has_features = true;
-  dump_sorted_features( &txn_ctx->epoch_ctx->features, &txn_context_msg->epoch_ctx.features );
-
-  /* Transaction Context -> slot_ctx */
-  txn_context_msg->has_slot_ctx  = true;
-  txn_context_msg->slot_ctx.slot = slot_ctx->slot_bank.slot;
-}
-
-/*  Similar to dump_instr_to_protobuf, but dumps individual transactions from a ledger replay.
-
-    This is more reliable for BPF program invocations since solfuzz-agave's transaction replay harness
-    is more robust.
-
-    The following arguments can be added when replaying ledger transactions:
-      --dump-txn-to-pb <0/1>
-        * If enabled, transactions will be dumped to the specified output directory
-      --dump-proto-sig-filter <base_58_enc_sig>
-        * If enabled, only transactions with the specified signature will be dumped
-        * Provided signature must be base58-encoded
-        * Default behavior if signature filter is not provided is to dump EVERY transaction
-      --dump-proto-output-dir <output_dir>
-        * Each file represents a single transaction as a serialized TxnContext Protobuf message
-        * File name format is "txn-<base58_enc_sig>.bin"
-*/
-void
-dump_txn_to_protobuf( fd_exec_txn_ctx_t *txn_ctx, fd_spad_t * spad ) {
-  FD_SCRATCH_SCOPE_BEGIN {
-    // Get base58-encoded tx signature
-    const fd_ed25519_sig_t * signatures = fd_txn_get_signatures( txn_ctx->txn_descriptor, txn_ctx->_txn_raw->raw );
-    fd_ed25519_sig_t signature; fd_memcpy( signature, signatures[0], sizeof(fd_ed25519_sig_t) );
-    char encoded_signature[FD_BASE58_ENCODED_64_SZ];
-    ulong out_size;
-    fd_base58_encode_64( signature, &out_size, encoded_signature );
-
-    if( txn_ctx->capture_ctx->dump_proto_sig_filter ) {
-      ulong filter_strlen = (ulong) strlen(txn_ctx->capture_ctx->dump_proto_sig_filter);
-
-      // Terminate early if the signature does not match
-      if( memcmp( txn_ctx->capture_ctx->dump_proto_sig_filter, encoded_signature, filter_strlen < out_size ? filter_strlen : out_size ) ) {
-        return;
-      }
-    }
-
-    fd_exec_test_txn_context_t txn_context_msg = FD_EXEC_TEST_TXN_CONTEXT_INIT_DEFAULT;
-    create_txn_context_protobuf_from_txn( &txn_context_msg, txn_ctx, spad );
-
-    /* Output to file */
-    ulong out_buf_size = 100 * 1024 * 1024;
-    uint8_t * out = fd_scratch_alloc( alignof(uint8_t), out_buf_size );
-    pb_ostream_t stream = pb_ostream_from_buffer( out, out_buf_size );
-    if( pb_encode( &stream, FD_EXEC_TEST_TXN_CONTEXT_FIELDS, &txn_context_msg ) ) {
-      char output_filepath[256]; fd_memset( output_filepath, 0, sizeof(output_filepath) );
-      char * position = fd_cstr_init( output_filepath );
-      position = fd_cstr_append_cstr( position, txn_ctx->capture_ctx->dump_proto_output_dir );
-      position = fd_cstr_append_cstr( position, "/txn-" );
-      position = fd_cstr_append_cstr( position, encoded_signature );
-      position = fd_cstr_append_cstr(position, ".bin");
-      fd_cstr_fini(position);
-
-      FILE * file = fopen(output_filepath, "wb");
-      if( file ) {
-        fwrite( out, 1, stream.bytes_written, file );
-        fclose( file );
-      }
-    }
-  } FD_SCRATCH_SCOPE_END;
-}
-
-int
 fd_execute_txn( fd_exec_txn_ctx_t * txn_ctx ) {
   FD_SCRATCH_SCOPE_BEGIN {
     uint use_sysvar_instructions = fd_executor_txn_uses_sysvar_instructions( txn_ctx );
-
-    for( ushort i = 0; i < txn_ctx->txn_descriptor->instr_cnt; i++ ) {
-      fd_txn_instr_t const * txn_instr = &txn_ctx->txn_descriptor->instr[i];
-      fd_convert_txn_instr_to_instr( txn_ctx, txn_instr, txn_ctx->borrowed_accounts, &txn_ctx->instr_infos[i] );
-    }
-
-    txn_ctx->instr_info_cnt = txn_ctx->txn_descriptor->instr_cnt;
-    if( FD_UNLIKELY( txn_ctx->instr_info_cnt>FD_MAX_INSTRUCTION_TRACE_LENGTH ) ) {
-      return FD_EXECUTOR_INSTR_ERR_MAX_INSN_TRACE_LENS_EXCEEDED;
-    }
-
-    /* TODO: This needs to get moved to fd_executor_load_transaction_accounts */
     int ret = 0;
-    if( FD_UNLIKELY( use_sysvar_instructions ) ) {
-      ret = fd_sysvar_instructions_serialize_account( txn_ctx, (fd_instr_info_t const *)txn_ctx->instr_infos, txn_ctx->txn_descriptor->instr_cnt );
-      if( ret != FD_ACC_MGR_SUCCESS ) {
-        FD_LOG_WARNING(( "sysvar instrutions failed to serialize" ));
-        return ret;
-      }
-    }
 
 #ifdef VLOG
     fd_txn_t const *txn = txn_ctx->txn_descriptor;
@@ -1836,7 +1364,7 @@ fd_execute_txn( fd_exec_txn_ctx_t * txn_ctx ) {
 
       if( dump_insn ) {
         // Capture the input and convert it into a Protobuf message
-        dump_instr_to_protobuf(txn_ctx, &txn_ctx->instr_infos[i], i);
+        fd_dump_instr_to_protobuf(txn_ctx, &txn_ctx->instr_infos[i], i);
       }
 
 
@@ -1870,13 +1398,6 @@ fd_execute_txn( fd_exec_txn_ctx_t * txn_ctx ) {
   #ifdef VLOG
         }
   #endif
-        if ( FD_UNLIKELY( use_sysvar_instructions ) ) {
-          ret = fd_sysvar_instructions_cleanup_account( txn_ctx );
-          if( ret != FD_ACC_MGR_SUCCESS ) {
-            FD_LOG_WARNING(( "sysvar instructions failed to cleanup" ));
-            return ret;
-          }
-        }
         return exec_result;
       }
     }
@@ -1884,24 +1405,9 @@ fd_execute_txn( fd_exec_txn_ctx_t * txn_ctx ) {
     if ( err != FD_EXECUTOR_INSTR_SUCCESS) {
       FD_TXN_ERR_FOR_LOG_INSTR( txn_ctx, err, txn_ctx->instr_err_idx );
       FD_LOG_DEBUG(( "fd_executor_txn_check failed (%d)", err ));
-      if ( FD_UNLIKELY( use_sysvar_instructions ) ) {
-        ret = fd_sysvar_instructions_cleanup_account( txn_ctx );
-        if( ret != FD_ACC_MGR_SUCCESS ) {
-          FD_LOG_WARNING(( "sysvar instructions failed to cleanup" ));
-          FD_TXN_ERR_FOR_LOG_INSTR( txn_ctx, ret, txn_ctx->instr_err_idx );
-          return ret;
-        }
-      }
       return err;
     }
 
-    if ( FD_UNLIKELY( use_sysvar_instructions ) ) {
-      ret = fd_sysvar_instructions_cleanup_account( txn_ctx );
-      if( ret != FD_ACC_MGR_SUCCESS ) {
-        FD_LOG_WARNING(( "sysvar instructions failed to cleanup" ));
-        return ret;
-      }
-    }
     return 0;
   } FD_SCRATCH_SCOPE_END;
 }
@@ -1990,8 +1496,8 @@ fd_executor_txn_check( fd_exec_slot_ctx_t const * slot_ctx,
   }
 
   /* https://github.com/anza-xyz/agave/blob/b2c388d6cbff9b765d574bbb83a4378a1fc8af32/svm/src/transaction_processor.rs#L839-L845 */
-  if( FD_UNLIKELY( ending_lamports_l != starting_lamports_l && ending_lamports_h != starting_lamports_h ) ) {
-    FD_LOG_DEBUG(( "Lamport sum mismatch: starting %lu%lu ending %lu%lu", starting_lamports_h, starting_lamports_l, ending_lamports_h, ending_lamports_l ));
+  if( FD_UNLIKELY( ending_lamports_l != starting_lamports_l || ending_lamports_h != starting_lamports_h ) ) {
+    FD_LOG_DEBUG(( "Lamport sum mismatch: starting %lx%lx ending %lx%lx", starting_lamports_h, starting_lamports_l, ending_lamports_h, ending_lamports_l ));
     return FD_EXECUTOR_INSTR_ERR_UNBALANCED_INSTR;
   }
 

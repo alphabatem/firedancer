@@ -4,17 +4,24 @@
 #include <stddef.h>
 
 #include "../fd_quic_common.h"
+#include "../../../util/bits/fd_bits.h"
 
 static inline uint
-fd_quic_varint_min_sz( ulong val ) {
-  val = fd_ulong_min( val, 0x3fffffffffffffffUL );
+fd_quic_varint_min_sz_unsafe( ulong val ) {
   int sz_class = fd_uint_find_msb( (uint)fd_ulong_find_msb( val|0x3fUL ) + 2 ) - 2;
   return 1U<<sz_class;
 }
 
 static inline uint
+fd_quic_varint_min_sz( ulong val ) {
+  return fd_quic_varint_min_sz_unsafe( fd_ulong_min( val, 0x3fffffffffffffffUL ) );
+}
+
+static inline uint
 fd_quic_varint_encode( uchar out[8],
                        ulong val ) {
+  /* max out at 0x3fffffffffffffffUL */
+  val = fd_ulong_min( val, 0x3fffffffffffffffUL );
 
   /* input byte pattern:
      - sz 1: aa 00 00 00 00 00 00 00
@@ -22,7 +29,7 @@ fd_quic_varint_encode( uchar out[8],
      - sz 4: aa bb cc dd 00 00 00 00
      - sz 8: aa bb cc dd ee ff ff gg */
 
-  uint sz = fd_quic_varint_min_sz( val );
+  uint sz = fd_quic_varint_min_sz_unsafe( val );
 
   /* shifted byte pattern
      - sz 1: 00 00 00 00 00 00 00 aa
@@ -99,6 +106,23 @@ fd_quic_one_rtt_h0( uint spin_bit,   /* [0,1] */
                     uint key_phase,  /* [0,1] */
                     uint pkt_num_len /* [0,3] */ ) {
   return (uchar)( 0x40 | (spin_bit<<5) | (key_phase<<2) | pkt_num_len );
+}
+
+static inline uint
+fd_quic_one_rtt_spin_bit( uint h0 ) {
+  return (uint)( (h0>>5) & 1 );
+}
+
+static inline uint
+fd_quic_one_rtt_key_phase( uint h0 ) {
+  return (uint)( (h0>>2) & 1 );
+}
+
+static inline uchar
+fd_quic_stream_type( uint has_off,
+                     uint has_len,
+                     uint fin ) {
+  return (uchar)( 0x08 + (has_off<<2) + (has_len<<1) + fin );
 }
 
 __attribute__((used)) static ulong

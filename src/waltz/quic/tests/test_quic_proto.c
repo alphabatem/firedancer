@@ -1,3 +1,4 @@
+#include "../../../util/fd_util.h"
 #include "../fd_quic_common.h"
 #include "../fd_quic_proto.h"
 #include "../fd_quic_proto.c"
@@ -108,16 +109,16 @@ test_varint_encode( void ) {
   FD_TEST( buf[0]==0xff && buf[1]==0xff && buf[2]==0xff && buf[3]==0xff &&
            buf[4]==0xff && buf[5]==0xff && buf[6]==0xff && buf[7]==0xff );
 
-  /* Truncate oversize numbers */
+  /* Saturate oversize numbers */
   v.i = 0x4000000000000000UL;
   FD_TEST( fd_quic_encode_varint_test( buf, sizeof(buf), &v )==8UL );
-  FD_TEST( buf[0]==0xc0 && buf[1]==0x00 && buf[2]==0x00 && buf[3]==0x00 &&
-           buf[4]==0x00 && buf[5]==0x00 && buf[6]==0x00 && buf[7]==0x00 );
+  FD_TEST( buf[0]==0xff && buf[1]==0xff && buf[2]==0xff && buf[3]==0xff &&
+           buf[4]==0xff && buf[5]==0xff && buf[6]==0xff && buf[7]==0xff );
 
   v.i = 0x8000000000000000UL;
   FD_TEST( fd_quic_encode_varint_test( buf, sizeof(buf), &v )==8UL );
-  FD_TEST( buf[0]==0xc0 && buf[1]==0x00 && buf[2]==0x00 && buf[3]==0x00 &&
-           buf[4]==0x00 && buf[5]==0x00 && buf[6]==0x00 && buf[7]==0x00 );
+  FD_TEST( buf[0]==0xff && buf[1]==0xff && buf[2]==0xff && buf[3]==0xff &&
+           buf[4]==0xff && buf[5]==0xff && buf[6]==0xff && buf[7]==0xff );
 
   v.i = 0xffffffffffffffffUL;
   FD_TEST( fd_quic_encode_varint_test( buf, sizeof(buf), &v )==8UL );
@@ -308,6 +309,72 @@ test_crypto_frame( void ) {
   FD_LOG_HEXDUMP_INFO(( "encoded", buf, rc ));
 }
 
+void
+test_stream_encode( void ) {
+  uchar buf[128];
+
+  /* For reference:
+     fd_quic_encode_stream_frame( buf, end, stream_id, offset, data_sz, fin ) */
+
+  /* Not enough space */
+  for( ulong j=0UL; j<=25UL; j++ ) {
+    FD_TEST( fd_quic_encode_stream_frame( buf, buf+j, 0, 0, 0, 0 )==FD_QUIC_ENCODE_FAIL );
+  }
+
+  FD_TEST( fd_quic_encode_stream_frame( buf, buf+sizeof(buf), 0x4000, 0, 0x40, 0 )==7 );
+  uchar const s_a[7] =
+    { 0x0a,
+      0x80, 0x00, 0x40, 0x00,
+      0x40, 0x40 };
+  FD_TEST( fd_memeq( buf, s_a, 7 ) );
+  fd_quic_stream_a_frame_t f_a[1];
+  FD_TEST( fd_quic_decode_stream_a_frame( f_a, s_a, 7 ) );
+  FD_TEST( f_a->type==0xa && f_a->stream_id==0x4000 && f_a->length==0x40 );
+
+  FD_TEST( fd_quic_encode_stream_frame( buf, buf+sizeof(buf), 0x4000, 0, 0x40, 1 )==7 );
+  uchar const s_b[7] =
+    { 0x0b,
+      0x80, 0x00, 0x40, 0x00,
+      0x40, 0x40 };
+  FD_TEST( fd_memeq( buf, s_b, 7 ) );
+  fd_quic_stream_a_frame_t f_b[1];
+  FD_TEST( fd_quic_decode_stream_a_frame( f_b, s_b, 7 ) );
+  FD_TEST( f_b->type==0xb && f_b->stream_id==0x4000 && f_b->length==0x40 );
+
+  FD_TEST( fd_quic_encode_stream_frame( buf, buf+sizeof(buf), 0x4000, 0x5060, 0x41, 0 )==11 );
+  uchar const s_e[11] =
+    { 0x0e,
+      0x80, 0x00, 0x40, 0x00,
+      0x80, 0x00, 0x50, 0x60,
+      0x40, 0x41 };
+  FD_TEST( fd_memeq( buf, s_e, 11 ) );
+  fd_quic_stream_e_frame_t f_e[1];
+  FD_TEST( fd_quic_decode_stream_e_frame( f_e, s_e, 11 ) );
+  FD_TEST( f_e->type==0xe && f_e->stream_id==0x4000 && f_e->offset==0x5060 && f_e->length==0x41 );
+
+  FD_TEST( fd_quic_encode_stream_frame( buf, buf+sizeof(buf), 0x4000, 0x5060, 0x42, 1 )==11 );
+  uchar const s_f[11] =
+    { 0x0f,
+      0x80, 0x00, 0x40, 0x00,
+      0x80, 0x00, 0x50, 0x60,
+      0x40, 0x42 };
+  FD_TEST( fd_memeq( buf, s_f, 11 ) );
+  fd_quic_stream_e_frame_t f_f[1];
+  FD_TEST( fd_quic_decode_stream_e_frame( f_f, s_f, 11 ) );
+  FD_TEST( f_f->type==0xf && f_f->stream_id==0x4000 && f_f->offset==0x5060 && f_f->length==0x42 );
+}
+
+void
+test_path_response( void ) {
+  FD_TEST( FD_QUIC_MAX_FOOTPRINT(path_response_frame)==9 );
+  uchar buf[9];
+  fd_quic_path_response_frame_t frame[1] = {{ .data=0x0102030405060708UL }};
+  FD_TEST( fd_quic_encode_path_response_frame( buf, sizeof(buf), frame )==9 );
+  FD_TEST( fd_memeq( buf, "\x1b\x01\x02\x03\x04\x05\x06\x07\x08", 9 ) );
+  FD_TEST( fd_quic_decode_path_response_frame( frame, buf, sizeof(buf) )==9 );
+  FD_TEST( frame->data==0x0102030405060708UL );
+}
+
 int
 main( int     argc,
       char ** argv ) {
@@ -318,6 +385,8 @@ main( int     argc,
   test_varint_parse();
   test_pktnum_parse();
   test_crypto_frame();
+  test_stream_encode();
+  test_path_response();
 
   FD_LOG_NOTICE(( "pass" ));
   fd_halt();

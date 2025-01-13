@@ -25,7 +25,7 @@
    client. This means that it includes the max size of the account (10MiB)
    and the associated metadata. */
 
-#define FD_ACC_TOT_SZ_MAX (FD_ACC_SZ_MAX + sizeof(fd_account_meta_t))
+#define FD_ACC_TOT_SZ_MAX (FD_ACC_SZ_MAX + FD_ACCOUNT_META_FOOTPRINT)
 
 /* fd_acc_mgr_t translates between the runtime account DB abstraction
    and the actual funk database.  Also manages rent collection.
@@ -111,7 +111,6 @@ FD_FN_CONST static inline fd_pubkey_t const *
 fd_funk_key_to_acc( fd_funk_rec_key_t const * id ) {
   return (fd_pubkey_t const *)fd_type_pun_const( id->c );
 }
-
 
 /* Account Access API *************************************************/
 

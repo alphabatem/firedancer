@@ -10,13 +10,14 @@ use solana_streamer::nonblocking::quic::DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_M
 use solana_streamer::nonblocking::quic::DEFAULT_MAX_STREAMS_PER_MS;
 use solana_streamer::nonblocking::quic::DEFAULT_WAIT_FOR_CHUNK_TIMEOUT;
 use solana_streamer::streamer::StakedNodes;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::ptr::null;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+
+mod blaster;
 
 #[allow(non_upper_case_globals)]
 #[allow(non_camel_case_types)]
@@ -28,13 +29,13 @@ mod bindings {
 }
 
 use crate::bindings::{
-    fd_aio_pcapng_get_aio, fd_aio_pcapng_join, fd_aio_pcapng_start, fd_aio_pcapng_t, fd_boot,
+    fd_aio_pcapng_get_aio, fd_aio_pcapng_join, fd_aio_pcapng_start_l3, fd_aio_pcapng_t, fd_boot,
     fd_halt, fd_pcapng_fwrite_tls_key_log, fd_quic_connect, fd_quic_get_aio_net_rx, fd_quic_init,
     fd_quic_limits_t, fd_quic_new_anonymous, fd_quic_new_anonymous_small, fd_quic_service,
-    fd_quic_set_aio_net_tx, fd_quic_stream_t, fd_quic_t, fd_rng_t, fd_udpsock_align,
-    fd_udpsock_footprint, fd_udpsock_get_tx, fd_udpsock_join, fd_udpsock_new, fd_udpsock_service,
+    fd_quic_set_aio_net_tx, fd_quic_t, fd_rng_t, fd_udpsock_align, fd_udpsock_footprint,
+    fd_udpsock_get_tx, fd_udpsock_join, fd_udpsock_new, fd_udpsock_service, fd_udpsock_set_layer,
     fd_udpsock_set_rx, fd_udpsock_t, fd_wksp_new_anon, fd_wksp_t, FD_QUIC_CONN_STATE_ACTIVE,
-    FD_QUIC_CONN_STATE_DEAD, FD_QUIC_ROLE_CLIENT, FD_QUIC_ROLE_SERVER,
+    FD_QUIC_CONN_STATE_DEAD, FD_QUIC_ROLE_CLIENT, FD_QUIC_ROLE_SERVER, FD_UDPSOCK_LAYER_IP,
 };
 use libc::{fflush, fopen};
 
@@ -108,6 +109,7 @@ unsafe fn agave_to_fdquic() {
     )) as *mut c_void;
     let udpsock = fd_udpsock_join(fd_udpsock_new(udpsock_mem, 2048, 256, 256), udp_sock_fd);
     assert!(!udpsock.is_null(), "Failed to create fd_udpsock_t");
+    fd_udpsock_set_layer(udpsock, FD_UDPSOCK_LAYER_IP);
 
     let quic = fd_quic_new_anonymous_small(wksp, FD_QUIC_ROLE_SERVER as i32, &mut rng);
     assert!(!quic.is_null(), "Failed to create fd_quic_t");
@@ -143,7 +145,6 @@ unsafe fn agave_to_fdquic() {
         assert!(metrics.conn_aborted_cnt <= 1);
         assert!(metrics.conn_retry_cnt == 1);
         assert!(metrics.conn_err_no_slots_cnt == 0);
-        assert!(metrics.conn_err_tls_fail_cnt == 0);
         assert!(metrics.conn_err_retry_fail_cnt == 0);
         assert!(metrics.hs_created_cnt == 1);
         assert!(metrics.hs_err_alloc_fail_cnt == 0);
@@ -165,29 +166,6 @@ unsafe fn agave_to_fdquic() {
     fd_halt();
 }
 
-unsafe extern "C" fn stream_new_cb(
-    _stream: *mut fd_quic_stream_t,
-    _ctx: *mut c_void,
-) {
-}
-
-unsafe extern "C" fn stream_notify_cb(
-    _stream: *mut fd_quic_stream_t,
-    _ctx: *mut c_void,
-    _event: i32,
-) {
-}
-
-unsafe extern "C" fn stream_receive_cb(
-    _stream: *mut fd_quic_stream_t,
-    _ctx: *mut c_void,
-    _buf: *const u8,
-    _len: u64,
-    _offset: u64,
-    _fin: i32,
-) {
-}
-
 unsafe fn agave_to_fdquic_bench() {
     // Set up Firedancer components
 
@@ -205,18 +183,15 @@ unsafe fn agave_to_fdquic_bench() {
         conn_cnt: 1,
         handshake_cnt: 1,
         conn_id_cnt: 4,
-        rx_stream_cnt: 16,
         stream_id_cnt: 16,
         inflight_pkt_cnt: 1024,
         tx_buf_sz: 0,
         stream_pool_cnt: 8,
+        log_depth: 128,
     };
     let quic = fd_quic_new_anonymous(wksp, &quic_limits, FD_QUIC_ROLE_SERVER as i32, &mut rng);
     assert!(!quic.is_null(), "Failed to create fd_quic_t");
     (*quic).config.retry = 1;
-    (*quic).cb.stream_new = Some(stream_new_cb);
-    (*quic).cb.stream_notify = Some(stream_notify_cb);
-    (*quic).cb.stream_receive = Some(stream_receive_cb);
 
     // Rust's type system prevents us from passing raw pointers to a
     // thread even with appropriate synchronization barriers and unsafe.
@@ -231,6 +206,7 @@ unsafe fn agave_to_fdquic_bench() {
         )) as *mut c_void;
         let udpsock = fd_udpsock_join(fd_udpsock_new(udpsock_mem, 2048, 1024, 1024), udp_sock_fd);
         assert!(!udpsock.is_null(), "Failed to create fd_udpsock_t");
+        fd_udpsock_set_layer(udpsock, FD_UDPSOCK_LAYER_IP);
 
         let pcap = std::env::var("PCAP").unwrap_or_default();
         if !pcap.is_empty() {
@@ -240,7 +216,7 @@ unsafe fn agave_to_fdquic_bench() {
                 "wb\x00".as_ptr() as *const c_char,
             );
             assert!(!pcap_file.is_null());
-            fd_aio_pcapng_start(pcap_file as *mut c_void);
+            fd_aio_pcapng_start_l3(pcap_file as *mut c_void);
             fflush(pcap_file);
 
             static mut PCAP_FILE_GLOB: *mut FILE = std::ptr::null_mut();
@@ -282,15 +258,30 @@ unsafe fn agave_to_fdquic_bench() {
         std::thread::spawn(move || {
             let quic4: *mut fd_quic_t = quic2 as *mut fd_quic_t;
             let metrics = &(*quic4).metrics.__bindgen_anon_1;
-            let mut last_cnt = 0u64;
+            let mut last_net_rx_pkt_cnt = 0u64;
+            let mut last_net_rx_byte_cnt = 0u64;
+            let mut last_stream_rx_byte_cnt = 0u64;
             loop {
+                let net_rx_pkt_d = metrics.net_rx_pkt_cnt - last_net_rx_pkt_cnt;
+                let net_rx_byte_d = metrics.net_rx_byte_cnt - last_net_rx_byte_cnt;
+                let stream_rx_byte_d = metrics.stream_rx_byte_cnt - last_stream_rx_byte_cnt;
+                let net_rx_gbps = ((8 * net_rx_byte_d) as f64) / 1e9f64;
+                let net_rx_mpps = (net_rx_pkt_d as f64) / 1e6f64;
+                let stream_rx_gbps = ((8 * stream_rx_byte_d) as f64) / 1e9f64;
+                last_net_rx_pkt_cnt = metrics.net_rx_pkt_cnt;
+                last_net_rx_byte_cnt = metrics.net_rx_byte_cnt;
+                last_stream_rx_byte_cnt = metrics.stream_rx_byte_cnt;
                 std::thread::sleep(Duration::from_secs(1));
-                println!("{}", metrics.net_rx_pkt_cnt - last_cnt);
-                last_cnt = metrics.net_rx_pkt_cnt;
+                println!(
+                    "data={:.3} Gbps  net_rx=({:.3} Gbps {:.3} Mpps)",
+                    net_rx_gbps, net_rx_mpps, stream_rx_gbps
+                );
+                println!("{}", metrics.pkt_no_conn_cnt);
             }
         });
 
         loop {
+            (*quic3).cb.stream_rx = None;
             fd_udpsock_service(udpsock);
             fd_quic_service(quic3);
         }
@@ -362,6 +353,7 @@ unsafe fn fdquic_to_agave() {
     )) as *mut c_void;
     let udpsock = fd_udpsock_join(fd_udpsock_new(udpsock_mem, 2048, 256, 256), udp_sock_fd);
     assert!(!udpsock.is_null(), "Failed to create fd_udpsock_t");
+    fd_udpsock_set_layer(udpsock, FD_UDPSOCK_LAYER_IP);
 
     let quic = fd_quic_new_anonymous_small(wksp, FD_QUIC_ROLE_CLIENT as i32, &mut rng);
     assert!(!quic.is_null(), "Failed to create fd_quic_t");
@@ -377,7 +369,7 @@ unsafe fn fdquic_to_agave() {
         "Connecting from 127.0.0.1:{} to 127.0.0.1:{}",
         client_port, listen_port
     );
-    let conn = fd_quic_connect(quic, 0x0100007f, listen_port, null());
+    let conn = fd_quic_connect(quic, 0x0100007f, listen_port);
     assert!(!conn.is_null());
     let conn_start = Instant::now();
     loop {
@@ -398,6 +390,7 @@ static USAGE: &str = r"Usage: ./firedancer-agave-quic-test <command>
 
 Available commands are:
 
+  blast:       Flood target with MTU-size QUIC streams
   ping-server: Ping solana_client to fd_quic server
   ping-client: Ping fd_quic client to solana_streamer server
   spam-server: Benchmark single solana_streamer client to fd_quic server";
@@ -422,6 +415,15 @@ fn main() {
     }
 
     match arg.as_str() {
+        "blast" => {
+            let arg = if let Some(arg) = std::env::args().nth(2) {
+                arg
+            } else {
+                eprintln!("Usage firedancer-agave-quic-test blast <endpoint:port>");
+                std::process::exit(1);
+            };
+            blaster::blast(arg);
+        }
         "ping-server" => unsafe { agave_to_fdquic() },
         "ping-client" => unsafe { fdquic_to_agave() },
         "spam-server" => unsafe { agave_to_fdquic_bench() },

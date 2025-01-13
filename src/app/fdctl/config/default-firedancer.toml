@@ -18,14 +18,23 @@
         funk_sz_gb = 32
         funk_rec_max = 10000000
         funk_txn_max = 1024
-        funk_file = ""
+        funk_file = "/tmp/default.funk"
         cluster_version =  "1.18.0"
-
     [tiles.pack]
         use_consumed_cus = false
+    [tiles.batch]
+        hash_tpool_thread_count = 3
 
 [consensus]
     vote = true
+
+[blockstore]
+    shred_max = 16384
+    block_max = 512
+    txn_max = 1048576
+    idx_max = 512
+    alloc_max = 10737418240
+    file = "/tmp/default.blockstore"
 
 [development]
     sandbox = false

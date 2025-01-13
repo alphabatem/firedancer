@@ -5,14 +5,19 @@
 #include "templ/fd_quic_transport_params.h"
 #include "fd_quic_conn_map.h"
 #include "fd_quic_stream.h"
+#include "log/fd_quic_log_tx.h"
 #include "fd_quic_pkt_meta.h"
-#include "crypto/fd_quic_crypto_suites.h"
 #include "tls/fd_quic_tls.h"
 #include "fd_quic_stream_pool.h"
+#include "fd_quic_pretty_print.h"
 
-#include "../../util/net/fd_eth.h"
 #include "../../util/net/fd_ip4.h"
 #include "../../util/net/fd_udp.h"
+
+/* Handshake allocator pool */
+#define POOL_NAME fd_quic_tls_hs_pool
+#define POOL_T    fd_quic_tls_hs_t
+#include "../../util/tmpl/fd_pool.c"
 
 /* FD_QUIC_DISABLE_CRYPTO: set to 1 to disable packet protection and
    encryption.  Only intended for testing. */
@@ -45,6 +50,7 @@ struct fd_quic_svc_queue {
 
 typedef struct fd_quic_svc_queue fd_quic_svc_queue_t;
 
+
 /* fd_quic_state_t is the internal state of an fd_quic_t.  Valid for
    lifetime of join. */
 
@@ -53,10 +59,6 @@ struct __attribute__((aligned(16UL))) fd_quic_state_private {
   ulong flags;
 
   ulong now; /* the time we entered into fd_quic_service, or fd_quic_aio_cb_receive */
-
-  /* Pointer to TLS state (part of quic memory region) */
-
-  fd_quic_tls_t * tls;
 
   /* transport_params: Template for QUIC-TLS transport params extension.
      Contains a mix of mutable and immutable fields.  Immutable fields
@@ -73,9 +75,12 @@ struct __attribute__((aligned(16UL))) fd_quic_state_private {
 
   /* Various internal state */
 
+  fd_quic_log_tx_t        log_tx[1];
   uint                    free_conn_list; /* free list of unused connections */
   fd_quic_conn_map_t *    conn_map;       /* map connection ids -> connection */
-  fd_quic_stream_pool_t * stream_pool;    /* stream pool */
+  fd_quic_tls_t           tls[1];
+  fd_quic_tls_hs_t *      hs_pool;
+  fd_quic_stream_pool_t * stream_pool;    /* stream pool, nullable */
   fd_rng_t                _rng[1];        /* random number generator */
   fd_quic_svc_queue_t     svc_queue[ FD_QUIC_SVC_CNT ]; /* dlists */
   ulong                   svc_delay[ FD_QUIC_SVC_CNT ]; /* target service delay */
@@ -99,6 +104,9 @@ struct __attribute__((aligned(16UL))) fd_quic_state_private {
   /* last arp/routing tables update */
   ulong ip_table_upd;
 
+  /* state for QUIC sampling */
+  fd_quic_pretty_print_t quic_pretty_print;
+
   /* secret for generating RETRY tokens */
   uchar retry_secret[FD_QUIC_RETRY_SECRET_SZ];
   uchar retry_iv    [FD_QUIC_RETRY_IV_SZ];
@@ -111,13 +119,11 @@ struct __attribute__((aligned(16UL))) fd_quic_state_private {
 #define FD_QUIC_STATE_OFF (fd_ulong_align_up( sizeof(fd_quic_t), alignof(fd_quic_state_t) ))
 
 struct fd_quic_pkt {
-  fd_eth_hdr_t       eth[1];
   fd_ip4_hdr_t       ip4[1];
   fd_udp_hdr_t       udp[1];
 
   /* the following are the "current" values only. There may be more QUIC packets
      in a UDP datagram */
-  fd_quic_long_hdr_t long_hdr[1];
   ulong              pkt_number;  /* quic packet number currently being decoded/parsed */
   ulong              rcv_time;    /* time packet was received */
   uint               enc_level;   /* encryption level */
@@ -126,6 +132,14 @@ struct fd_quic_pkt {
 # define ACK_FLAG_RQD     1
 # define ACK_FLAG_CANCEL  2
 };
+
+struct fd_quic_frame_ctx {
+  fd_quic_t *      quic;
+  fd_quic_conn_t * conn;
+  fd_quic_pkt_t *  pkt;
+};
+
+typedef struct fd_quic_frame_ctx fd_quic_frame_ctx_t;
 
 FD_PROTOTYPES_BEGIN
 
@@ -148,7 +162,7 @@ fd_quic_get_state_const( fd_quic_t const * quic ) {
    args
      quic        managing quic
      conn        connection to service
-     now         the current time in ns */
+     now         the current timestamp */
 void
 fd_quic_conn_service( fd_quic_t *      quic,
                       fd_quic_conn_t * conn,
@@ -190,15 +204,6 @@ fd_quic_tx_stream_free( fd_quic_t *        quic,
                         fd_quic_conn_t *   conn,
                         fd_quic_stream_t * stream,
                         int                code );
-
-/* fd_quic_stream_rx_reclaim frees streams and hashmap entries for
-   incoming unidirectional streams in range [stream_id_lo,stream_id_hi) */
-
-void
-fd_quic_stream_rx_reclaim( fd_quic_t *      quic,
-                           fd_quic_conn_t * conn,
-                           ulong            stream_id_lo,
-                           ulong            stream_id_hi );
 
 /* Callbacks provided by fd_quic **************************************/
 
@@ -251,51 +256,40 @@ fd_quic_now( fd_quic_t * quic ) {
 static inline void
 fd_quic_cb_conn_new( fd_quic_t *      quic,
                      fd_quic_conn_t * conn ) {
-  if( FD_UNLIKELY( !quic->cb.conn_new || conn->called_conn_new ) ) {
-    return;
-  }
+  if( conn->called_conn_new ) return;
+  conn->called_conn_new = 1;
+  if( !quic->cb.conn_new ) return;
 
   quic->cb.conn_new( conn, quic->cb.quic_ctx );
-  conn->called_conn_new = 1;
 }
 
 static inline void
 fd_quic_cb_conn_hs_complete( fd_quic_t *      quic,
                              fd_quic_conn_t * conn ) {
-  if( FD_UNLIKELY( !quic->cb.conn_hs_complete ) ) return;
+  if( !quic->cb.conn_hs_complete ) return;
   quic->cb.conn_hs_complete( conn, quic->cb.quic_ctx );
 }
 
 static inline void
 fd_quic_cb_conn_final( fd_quic_t *      quic,
                        fd_quic_conn_t * conn ) {
-  if( FD_UNLIKELY( !quic->cb.conn_final || !conn->called_conn_new ) ) return;
+  if( !quic->cb.conn_final || !conn->called_conn_new ) return;
   quic->cb.conn_final( conn, quic->cb.quic_ctx );
 }
 
-static inline void
-fd_quic_cb_stream_new( fd_quic_t *        quic,
-                       fd_quic_stream_t * stream ) {
-  quic->metrics.stream_opened_cnt++;
-  quic->metrics.stream_active_cnt++;
-
-  if( FD_UNLIKELY( !quic->cb.stream_new ) ) return;
-  quic->cb.stream_new( stream, quic->cb.quic_ctx );
-}
-
-static inline void
-fd_quic_cb_stream_receive( fd_quic_t *        quic,
-                           fd_quic_stream_t * stream,
-                           void *             stream_ctx,
-                           uchar const *      data,
-                           ulong              data_sz,
-                           ulong              offset,
-                           int                fin ) {
+static inline int
+fd_quic_cb_stream_rx( fd_quic_t *        quic,
+                      fd_quic_conn_t *   conn,
+                      ulong              stream_id,
+                      ulong              offset,
+                      uchar const *      data,
+                      ulong              data_sz,
+                      int                fin ) {
   quic->metrics.stream_rx_event_cnt++;
   quic->metrics.stream_rx_byte_cnt += data_sz;
 
-  if( FD_UNLIKELY( !quic->cb.stream_receive ) ) return;
-  quic->cb.stream_receive( stream, stream_ctx, data, data_sz, offset, fin );
+  if( !quic->cb.stream_rx ) return FD_QUIC_SUCCESS;
+  return quic->cb.stream_rx( conn, stream_id, offset, data, data_sz, fin );
 }
 
 static inline void
@@ -306,10 +300,15 @@ fd_quic_cb_stream_notify( fd_quic_t *        quic,
   quic->metrics.stream_closed_cnt[ event ]++;
   quic->metrics.stream_active_cnt--;
 
-  if( FD_UNLIKELY( !quic->cb.stream_notify ) ) return;
+  if( !quic->cb.stream_notify ) return;
   quic->cb.stream_notify( stream, stream_ctx, event );
 }
 
+
+FD_FN_CONST ulong
+fd_quic_reconstruct_pkt_num( ulong pktnum_comp,
+                             ulong pktnum_sz,
+                             ulong exp_pkt_number );
 
 void
 fd_quic_pkt_meta_retry( fd_quic_t *          quic,
@@ -325,15 +324,6 @@ fd_quic_reclaim_pkt_meta( fd_quic_conn_t *     conn,
                           uint                 enc_level );
 
 ulong
-fd_quic_send_retry( fd_quic_t *                  quic,
-                    fd_quic_pkt_t *              pkt,
-                    fd_quic_conn_id_t const *    orig_dst_conn_id,
-                    fd_quic_conn_id_t const *    new_conn_id,
-                    uchar const                  dst_mac_addr_u6[ 6 ],
-                    uint                         dst_ip_addr,
-                    ushort                       dst_udp_port );
-
-ulong
 fd_quic_process_quic_packet_v1( fd_quic_t *     quic,
                                 fd_quic_pkt_t * pkt,
                                 uchar *         cur_ptr,
@@ -343,7 +333,8 @@ ulong
 fd_quic_handle_v1_initial( fd_quic_t *               quic,
                            fd_quic_conn_t **         p_conn,
                            fd_quic_pkt_t *           pkt,
-                           fd_quic_conn_id_t const * conn_id,
+                           fd_quic_conn_id_t const * dcid,
+                           fd_quic_conn_id_t const * scid,
                            uchar *                   cur_ptr,
                            ulong                     cur_sz );
 
@@ -379,22 +370,10 @@ fd_quic_handle_v1_frame( fd_quic_t *       quic,
    an ACK instantly, ACK_FLAG_CANCEL suppresses the ACK by making this
    function behave like a no-op)  */
 
-void
+int
 fd_quic_lazy_ack_pkt( fd_quic_t *           quic,
                       fd_quic_conn_t *      conn,
                       fd_quic_pkt_t const * pkt );
-
-/* fd_quic_conn_error sets the connection state to aborted.  This does
-   not destroy the connection object.  Rather, it will eventually cause
-   the connection to be freed during a later fd_quic_service call.
-   reason is a RFC 9000 QUIC error code.  error_line is a implementation
-   defined error code for internal use (usually the source line of code
-   in fd_quic.c) */
-
-void
-fd_quic_conn_error( fd_quic_conn_t * conn,
-                    uint             reason,
-                    uint             error_line );
 
 static inline fd_quic_conn_t *
 fd_quic_conn_at_idx( fd_quic_state_t * quic_state, ulong idx ) {

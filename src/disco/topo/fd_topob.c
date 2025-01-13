@@ -65,7 +65,6 @@ void
 fd_topob_link( fd_topo_t *  topo,
                char const * link_name,
                char const * wksp_name,
-               int          is_reasm,
                ulong        depth,
                ulong        mtu,
                ulong        burst ) {
@@ -82,7 +81,6 @@ fd_topob_link( fd_topo_t *  topo,
   strncpy( link->name, link_name, sizeof(link->name) );
   link->id       = topo->link_cnt;
   link->kind_id  = kind_id;
-  link->is_reasm = is_reasm;
   link->depth    = depth;
   link->mtu      = mtu;
   link->burst    = burst;
@@ -91,18 +89,11 @@ fd_topob_link( fd_topo_t *  topo,
   link->mcache_obj_id = obj->id;
   FD_TEST( fd_pod_insertf_ulong( topo->props, depth, "obj.%lu.depth", obj->id ) );
 
-  if( FD_UNLIKELY( is_reasm ) ) {
-    obj = fd_topob_obj( topo, "reasm", wksp_name );
-    link->reasm_obj_id = obj->id;
-    FD_TEST( fd_pod_insertf_ulong( topo->props, depth, "obj.%lu.depth", obj->id ) );
-    FD_TEST( fd_pod_insertf_ulong( topo->props, burst, "obj.%lu.burst", obj->id ) );
-  } else if( FD_UNLIKELY( mtu ) ) {
-    obj = fd_topob_obj( topo, "dcache", wksp_name );
-    link->dcache_obj_id = obj->id;
-    FD_TEST( fd_pod_insertf_ulong( topo->props, depth, "obj.%lu.depth", obj->id ) );
-    FD_TEST( fd_pod_insertf_ulong( topo->props, burst, "obj.%lu.burst", obj->id ) );
-    FD_TEST( fd_pod_insertf_ulong( topo->props, mtu, "obj.%lu.mtu", obj->id ) );
-  }
+  obj = fd_topob_obj( topo, "dcache", wksp_name );
+  link->dcache_obj_id = obj->id;
+  FD_TEST( fd_pod_insertf_ulong( topo->props, depth, "obj.%lu.depth", obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, burst, "obj.%lu.burst", obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, mtu, "obj.%lu.mtu", obj->id ) );
   topo->link_cnt++;
 }
 
@@ -127,6 +118,7 @@ fd_topob_tile( fd_topo_t *    topo,
                char const *   metrics_wksp,
                ulong          cpu_idx,
                int            is_agave ) {
+
   if( FD_UNLIKELY( !topo || !tile_name || !tile_wksp || !metrics_wksp ) ) FD_LOG_ERR(( "NULL args" ));
   if( FD_UNLIKELY( strlen( tile_name )>=sizeof(topo->tiles[ topo->tile_cnt ].name ) ) ) FD_LOG_ERR(( "tile name too long: %s", tile_name ));
   if( FD_UNLIKELY( topo->tile_cnt>=FD_TOPO_MAX_TILES ) ) FD_LOG_ERR(( "too many tiles" ));
@@ -187,9 +179,7 @@ fd_topob_tile_in( fd_topo_t *  topo,
   tile->in_cnt++;
 
   fd_topob_tile_uses( topo, tile, &topo->objs[ link->mcache_obj_id ], FD_SHMEM_JOIN_MODE_READ_ONLY );
-  if( FD_UNLIKELY( link->is_reasm ) ) {
-    fd_topob_tile_uses( topo, tile, &topo->objs[ link->reasm_obj_id ], FD_SHMEM_JOIN_MODE_READ_ONLY );
-  } else if( FD_LIKELY( link->mtu ) ) {
+  if( FD_LIKELY( link->mtu ) ) {
     fd_topob_tile_uses( topo, tile, &topo->objs[ link->dcache_obj_id ], FD_SHMEM_JOIN_MODE_READ_ONLY );
   }
 }
@@ -213,9 +203,7 @@ fd_topob_tile_out( fd_topo_t *  topo,
   tile->out_cnt++;
 
   fd_topob_tile_uses( topo, tile, &topo->objs[ link->mcache_obj_id ], FD_SHMEM_JOIN_MODE_READ_WRITE );
-  if( FD_UNLIKELY( link->is_reasm ) ) {
-    fd_topob_tile_uses( topo, tile, &topo->objs[ link->reasm_obj_id ], FD_SHMEM_JOIN_MODE_READ_WRITE );
-  } else if( FD_LIKELY( link->mtu ) ) {
+  if( FD_LIKELY( link->mtu ) ) {
     fd_topob_tile_uses( topo, tile, &topo->objs[ link->dcache_obj_id ], FD_SHMEM_JOIN_MODE_READ_WRITE );
   }
 }
@@ -242,7 +230,7 @@ validate( fd_topo_t const * topo ) {
       for( ulong k=0UL; k<topo->tiles[ i ].in_cnt; k++ ) {
         if( FD_UNLIKELY( j==k ) ) continue;
         if( FD_UNLIKELY( topo->tiles[ i ].in_link_id[ j ] == topo->tiles[ i ].in_link_id[ k ] ) )
-          FD_LOG_ERR(( "tile %lu (%s) has duplicated in link %lu (%s)", i, topo->tiles[ i ].name, 
+          FD_LOG_ERR(( "tile %lu (%s) has duplicated in link %lu (%s)", i, topo->tiles[ i ].name,
               topo->tiles[ i ].in_link_id[ j ], topo->links[ topo->tiles[ i ].in_link_id[ j ] ].name ));
       }
     }
@@ -254,7 +242,7 @@ validate( fd_topo_t const * topo ) {
       for( ulong k=0UL; k<topo->tiles[ i ].out_cnt; k++ ) {
         if( FD_UNLIKELY( j==k ) ) continue;
         if( FD_UNLIKELY( topo->tiles[ i ].out_link_id[ j ] == topo->tiles[ i ].out_link_id[ k ] ) )
-          FD_LOG_ERR(( "tile %lu (%s) has duplicated out link %lu (%s)", i, topo->tiles[ i ].name, 
+          FD_LOG_ERR(( "tile %lu (%s) has duplicated out link %lu (%s)", i, topo->tiles[ i ].name,
               topo->tiles[ i ].out_link_id[ j ], topo->links[ topo->tiles[ i ].out_link_id[ j ] ].name ));
       }
     }
@@ -366,9 +354,12 @@ fd_topob_auto_layout( fd_topo_t * topo ) {
     "gossip", /* FIREDANCER only */
     "repair", /* FIREDANCER only */
     "replay", /* FIREDANCER only */
-    "thread", /* FIREDANCER only */
+    "rtpool", /* FIREDANCER only */
     "sender", /* FIREDANCER only */
     "eqvoc",  /* FIREDANCER only */
+    "rpcsrv", /* FIREDANCER only */
+    "batch",  /* FIREDANCER only */
+    "btpool", /* FIREDANCER only */
 #endif
   };
 
@@ -470,7 +461,7 @@ fd_topob_finish( fd_topo_t * topo,
       loose_sz += loose( topo, obj );
     }
 
-    ulong part_max = 1UL + (loose_sz / (64UL << 10));
+    ulong part_max = 3UL + (loose_sz / (64UL << 10)); /* 3 for initial alignment + actual alloc + residual padding */
     ulong offset = fd_ulong_align_up( fd_wksp_private_data_off( part_max ), fd_topo_workspace_align() );
 
     for( ulong j=0UL; j<topo->obj_cnt; j++ ) {
@@ -502,6 +493,6 @@ fd_topob_finish( fd_topo_t * topo,
     wksp->page_sz = page_sz;
     wksp->page_cnt = wksp_aligned_footprint / page_sz;
   }
-  
+
   validate( topo );
 }

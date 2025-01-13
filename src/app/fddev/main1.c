@@ -9,25 +9,26 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-extern configure_stage_t _kill;
-extern configure_stage_t netns;
-extern configure_stage_t genesis;
-extern configure_stage_t blockstore;
-extern configure_stage_t keys;
+extern configure_stage_t fd_cfg_stage_kill;
+extern configure_stage_t fd_cfg_stage_netns;
+extern configure_stage_t fd_cfg_stage_genesis;
+extern configure_stage_t fd_cfg_stage_blockstore;
+extern configure_stage_t fd_cfg_stage_keys;
 
 configure_stage_t * STAGES[ CONFIGURE_STAGE_COUNT ] = {
-  &_kill,
-  &netns,
-  &hugetlbfs,
-  &sysctl,
-  &ethtool_channels,
-  &ethtool_gro,
-  &keys,
-  &genesis,
+  &fd_cfg_stage_kill,
+  &fd_cfg_stage_netns,
+  &fd_cfg_stage_hugetlbfs,
+  &fd_cfg_stage_sysctl,
+  &fd_cfg_stage_ethtool_channels,
+  &fd_cfg_stage_ethtool_gro,
+  &fd_cfg_stage_ethtool_loopback,
+  &fd_cfg_stage_keys,
+  &fd_cfg_stage_genesis,
 #ifdef FD_HAS_NO_AGAVE
   NULL,
 #else
-  &blockstore,
+  &fd_cfg_stage_blockstore,
 #endif
   NULL,
 };
@@ -58,9 +59,12 @@ extern fd_topo_run_tile_t fd_tile_repair;
 extern fd_topo_run_tile_t fd_tile_store_int;
 extern fd_topo_run_tile_t fd_tile_replay;
 extern fd_topo_run_tile_t fd_tile_replay_thread;
+extern fd_topo_run_tile_t fd_tile_batch;
+extern fd_topo_run_tile_t fd_tile_batch_thread;
 extern fd_topo_run_tile_t fd_tile_poh_int;
 extern fd_topo_run_tile_t fd_tile_sender;
 extern fd_topo_run_tile_t fd_tile_eqvoc;
+extern fd_topo_run_tile_t fd_tile_rpcserv;
 #endif
 
 fd_topo_run_tile_t * TILES[] = {
@@ -89,9 +93,12 @@ fd_topo_run_tile_t * TILES[] = {
   &fd_tile_store_int,
   &fd_tile_replay,
   &fd_tile_replay_thread,
+  &fd_tile_batch,
+  &fd_tile_batch_thread,
   &fd_tile_poh_int,
   &fd_tile_sender,
   &fd_tile_eqvoc,
+  &fd_tile_rpcserv,
 #endif
   NULL,
 };
@@ -103,8 +110,9 @@ static action_t DEV_ACTIONS[] = {
   { .name = "txn",     .args = txn_cmd_args,     .fn = txn_cmd_fn,     .perm = txn_cmd_perm     },
   { .name = "bench",   .args = bench_cmd_args,   .fn = bench_cmd_fn,   .perm = bench_cmd_perm   },
   { .name = "load",    .args = load_cmd_args,    .fn = load_cmd_fn,    .perm = load_cmd_perm    },
-  { .name = "dump",    .args = dump_cmd_args,    .fn = dump_cmd_fn,    .perm = NULL             },
-  { .name = "flame",   .args = flame_cmd_args,   .fn = flame_cmd_fn,   .perm = flame_cmd_perm   },
+  { .name = "dump",    .args = dump_cmd_args,    .fn = dump_cmd_fn,    .perm = NULL,           .is_diagnostic=1 },
+  { .name = "flame",   .args = flame_cmd_args,   .fn = flame_cmd_fn,   .perm = flame_cmd_perm, .is_diagnostic=1 },
+  { .name = "quic-trace", .args = quic_trace_cmd_args, .fn = quic_trace_cmd_fn, .perm = NULL, .is_diagnostic=1 },
 };
 
 extern char fd_log_private_path[ 1024 ];
@@ -167,12 +175,6 @@ fddev_main( int     argc,
 
   fdctl_boot( &argc, &argv, &config, log_path );
 
-  /* load configuration and command line parsing */
-  if( FD_UNLIKELY( config.is_live_cluster ) )
-    FD_LOG_ERR(( "The `fddev` command is for development and test environments but your "
-                 "configuration targets a live cluster. Use `fdctl` if this is a "
-                 "production environment" ));
-
   int no_sandbox = fd_env_strip_cmdline_contains( &argc, &argv, "--no-sandbox" );
   int no_clone = fd_env_strip_cmdline_contains( &argc, &argv, "--no-clone" );
   config.development.no_clone = config.development.no_clone || no_clone;
@@ -199,6 +201,12 @@ fddev_main( int     argc,
   }
 
   if( FD_UNLIKELY( !action ) ) FD_LOG_ERR(( "unknown subcommand `%s`", action_name ));
+
+  int is_allowed_live = action->is_diagnostic==1;
+  if( FD_UNLIKELY( config.is_live_cluster && !is_allowed_live ) )
+    FD_LOG_ERR(( "The `fddev` command is for development and test environments but your "
+                 "configuration targets a live cluster. Use `fdctl` if this is a "
+                 "production environment" ));
 
   args_t args = {0};
   if( FD_LIKELY( action->args ) ) action->args( &argc, &argv, &args );

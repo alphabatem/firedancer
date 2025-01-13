@@ -50,7 +50,10 @@
 /* Sha256 pre-image size for pings/pongs */
 #define FD_PING_PRE_IMAGE_SZ (48UL)
 /* Number of recognized CRDS enum members */
-#define FD_KNOWN_CRDS_ENUM_MAX (12UL)
+#define FD_KNOWN_CRDS_ENUM_MAX (14UL)
+/* Prune data prefix
+   https://github.com/anza-xyz/agave/blob/0c264859b127940f13673b5fea300131a70b1a8d/gossip/src/protocol.rs#L39 */
+#define FD_GOSSIP_PRUNE_DATA_PREFIX "\xffSOLANA_PRUNE_DATA"
 
 #define FD_NANOSEC_TO_MILLI(_ts_) ((ulong)(_ts_/1000000))
 
@@ -351,7 +354,7 @@ fd_gossip_footprint( void ) {
   l = FD_LAYOUT_APPEND( l, fd_stats_table_align(), fd_stats_table_footprint(FD_STATS_KEY_MAX) );
   l = FD_LAYOUT_APPEND( l, fd_weights_table_align(), fd_weights_table_footprint(MAX_STAKE_WEIGHTS) );
   l = FD_LAYOUT_APPEND( l, fd_push_states_pool_align(), fd_push_states_pool_footprint(FD_PUSH_LIST_MAX) );
-  l = FD_LAYOUT_FINI(l, fd_gossip_align());
+  l = FD_LAYOUT_FINI( l, fd_gossip_align() );
   return l;
 }
 
@@ -391,7 +394,7 @@ fd_gossip_new ( void * shmem, ulong seed ) {
   shm = FD_SCRATCH_ALLOC_APPEND(l, fd_push_states_pool_align(), fd_push_states_pool_footprint(FD_PUSH_LIST_MAX));
   glob->push_states_pool = fd_push_states_pool_join( fd_push_states_pool_new( shm, FD_PUSH_LIST_MAX ) );
 
-  ulong scratch_top = FD_SCRATCH_ALLOC_FINI(l, 1UL);
+  ulong scratch_top = FD_SCRATCH_ALLOC_FINI( l, fd_gossip_align() );
   if ( scratch_top > (ulong)shmem + fd_gossip_footprint() ) {
     FD_LOG_ERR(("Not enough space allocated for gossip"));
   }
@@ -439,6 +442,28 @@ fd_gossip_unlock( fd_gossip_t * gossip ) {
   FD_VOLATILE( gossip->lock ) = 0UL;
 }
 
+/* FIXME: do these go in fd_types_custom instead? */
+void
+fd_gossip_ipaddr_from_socketaddr( fd_gossip_socket_addr_t const * addr, fd_gossip_ip_addr_t * out ) {
+  if( FD_LIKELY( addr->discriminant == fd_gossip_socket_addr_enum_ip4 ) ) {
+    fd_gossip_ip_addr_new_disc(out, fd_gossip_ip_addr_enum_ip4);
+    out->inner.ip4 = addr->inner.ip4.addr;
+  } else {
+    fd_gossip_ip_addr_new_disc(out, fd_gossip_ip_addr_enum_ip6);
+    out->inner.ip6 = addr->inner.ip6.addr;
+  }
+}
+
+ushort
+fd_gossip_port_from_socketaddr( fd_gossip_socket_addr_t const * addr ) {
+  if( FD_LIKELY( addr->discriminant == fd_gossip_socket_addr_enum_ip4 ) ) {
+    return addr->inner.ip4.port;
+  } else {
+    return addr->inner.ip6.port;
+  }
+}
+
+
 void
 fd_gossip_contact_info_v2_to_v1( fd_gossip_contact_info_v2_t const * v2,
                                  fd_gossip_contact_info_v1_t *       v1 ) {
@@ -465,8 +490,25 @@ fd_gossip_contact_info_v2_find_proto_ident( fd_gossip_contact_info_v2_t const * 
       if( socket_entry->index>=contact_info->addrs_len) {
         continue;
       }
-      out_addr->addr = contact_info->addrs[ socket_entry->index ];
-      out_addr->port = port;
+
+      /* Annoyingly, fd_gossip_socket_addr->inner and fd_gossip_ip_addr
+         are slightly different, so we can't just 
+         out_addr->ip = contact_info->addrs[ idx ]
+         
+         Potential ptimization idea:
+         - first 4 + 32/128 bytes of a fd_gossip_socket_addr_t can cast directly to fd_gossip_ip_addr_t AKA:
+           fd_memcpy( out_addr, &contact_info->addrs[ socket_entry->index ], sizeof(fd_gossip_ip_addr_t) );
+           out_addr->port = port; */
+      fd_gossip_ip_addr_t * tmp = &contact_info->addrs[ socket_entry->index ];
+      if( FD_LIKELY( tmp->discriminant == fd_gossip_ip_addr_enum_ip4 ) ) {
+        out_addr->discriminant = fd_gossip_socket_addr_enum_ip4;
+        out_addr->inner.ip4.addr = tmp->inner.ip4;
+        out_addr->inner.ip4.port = port;
+      } else {
+        out_addr->discriminant = fd_gossip_socket_addr_enum_ip6;
+        out_addr->inner.ip6.addr = tmp->inner.ip6;
+        out_addr->inner.ip6.port = port;
+      }
       return 1;
     }
   }
@@ -477,9 +519,9 @@ fd_gossip_contact_info_v2_find_proto_ident( fd_gossip_contact_info_v2_t const * 
 /* Convert my style of address to solana style */
 int
 fd_gossip_to_soladdr( fd_gossip_socket_addr_t * dst, fd_gossip_peer_addr_t const * src ) {
-  dst->port = ntohs(src->port);
-  fd_gossip_ip_addr_new_disc(&dst->addr, fd_gossip_ip_addr_enum_ip4);
-  dst->addr.inner.ip4 = src->addr;
+  fd_gossip_socket_addr_new_disc( dst, fd_gossip_socket_addr_enum_ip4 );
+  dst->inner.ip4.port = ntohs(src->port); 
+  dst->inner.ip4.addr = src->addr;
   return 0;
 }
 
@@ -488,12 +530,12 @@ int
 fd_gossip_from_soladdr(fd_gossip_peer_addr_t * dst, fd_gossip_socket_addr_t const * src ) {
   FD_STATIC_ASSERT(sizeof(fd_gossip_peer_addr_t) == sizeof(ulong),"messed up size");
   dst->l = 0;
-  dst->port = htons(src->port);
-  if (src->addr.discriminant == fd_gossip_ip_addr_enum_ip4) {
-    dst->addr = src->addr.inner.ip4;
+  if (src->discriminant == fd_gossip_socket_addr_enum_ip4) {
+    dst->port = htons(src->inner.ip4.port);
+    dst->addr = src->inner.ip4.addr;
     return 0;
   } else {
-    FD_LOG_ERR(("invalid address family"));
+    FD_LOG_ERR(("invalid address family %lu", (ulong)src->discriminant));
     return -1;
   }
 }
@@ -791,6 +833,14 @@ fd_gossip_sign_crds_value( fd_gossip_t * glob, fd_crds_value_t * crd ) {
   case fd_crds_data_enum_contact_info_v2:
     pubkey = &crd->data.inner.contact_info_v2.from;
     wallclock = &crd->data.inner.contact_info_v2.wallclock;
+    break;
+  case fd_crds_data_enum_restart_last_voted_fork_slots:
+    pubkey = &crd->data.inner.restart_last_voted_fork_slots.from;
+    wallclock = &crd->data.inner.restart_last_voted_fork_slots.wallclock;
+    break;
+  case fd_crds_data_enum_restart_heaviest_fork:
+    pubkey = &crd->data.inner.restart_heaviest_fork.from;
+    wallclock = &crd->data.inner.restart_heaviest_fork.wallclock;
     break;
   default:
     return;
@@ -1133,6 +1183,14 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
     pubkey = &crd->data.inner.contact_info_v2.from;
     wallclock = crd->data.inner.contact_info_v2.wallclock;
     break;
+  case fd_crds_data_enum_restart_last_voted_fork_slots:
+    pubkey = &crd->data.inner.restart_last_voted_fork_slots.from;
+    wallclock = crd->data.inner.restart_last_voted_fork_slots.wallclock;
+    break;
+  case fd_crds_data_enum_restart_heaviest_fork:
+    pubkey = &crd->data.inner.restart_heaviest_fork.from;
+    wallclock = crd->data.inner.restart_heaviest_fork.wallclock;
+    break;
   default:
     wallclock = FD_NANOSEC_TO_MILLI(glob->now); /* In millisecs */
     break;
@@ -1195,16 +1253,11 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
     return;
   }
 
-  ctx.data = buf;
-  ctx.dataend = buf + PACKET_DATA_SIZE;
-  if ( fd_crds_data_encode( &crd->data, &ctx ) ) {
-    FD_LOG_ERR(("fd_crds_data_encode failed"));
-    return;
-  }
-
+  /* Verify signature against the encoded CRDS data */
+  uchar* data_buf = &buf[ sizeof(fd_signature_t) ];
   fd_sha512_t sha[1];
-  if (fd_ed25519_verify( /* msg */ buf,
-                         /* sz  */ (ulong)((uchar*)ctx.data - buf),
+  if (fd_ed25519_verify( /* msg */ data_buf,
+                         /* sz  */ (ulong)((uchar*)ctx.data - data_buf),
                          /* sig */ crd->signature.uc,
                          /* public_key */ pubkey->uc,
                          sha )) {
@@ -1222,7 +1275,7 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
   msg->wallclock = wallclock;
   fd_hash_copy(&msg->origin, pubkey);
 
-  /* We store the serialized form for convenience */
+  /* We store the serialized form of the full CRDS value */
   fd_memcpy(msg->data, buf, datalen);
   msg->datalen = datalen;
 
@@ -1234,7 +1287,7 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
 
   if (crd->data.discriminant == fd_crds_data_enum_contact_info_v1) {
     fd_gossip_contact_info_v1_t * info = &crd->data.inner.contact_info_v1;
-    if (info->gossip.port != 0) {
+    if( fd_gossip_port_from_socketaddr(&info->gossip) != 0) {
       /* Remember the peer */
       fd_gossip_peer_addr_t pkey;
       fd_memset(&pkey, 0, sizeof(pkey));
@@ -1259,8 +1312,8 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
       }
     }
 
-    fd_gossip_peer_addr_t peer_addr = { .addr = crd->data.inner.contact_info_v1.gossip.addr.inner.ip4,
-                                        .port = fd_ushort_bswap( crd->data.inner.contact_info_v1.gossip.port ) };
+    fd_gossip_peer_addr_t peer_addr = { .addr = crd->data.inner.contact_info_v1.gossip.inner.ip4.addr,
+                                        .port = fd_ushort_bswap( crd->data.inner.contact_info_v1.gossip.inner.ip4.port ) };
     if (glob->my_contact_info.shred_version == 0U && fd_gossip_is_allowed_entrypoint( glob, &peer_addr )) {
       FD_LOG_NOTICE(("using shred version %lu", (ulong)crd->data.inner.contact_info_v1.shred_version));
       glob->my_contact_info.shred_version = crd->data.inner.contact_info_v1.shred_version;
@@ -1271,7 +1324,7 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
     fd_gossip_contact_info_v2_t * info = &crd->data.inner.contact_info_v2;
     fd_gossip_socket_addr_t socket_addr;
     if( fd_gossip_contact_info_v2_find_proto_ident( info, FD_GOSSIP_SOCKET_TAG_GOSSIP, &socket_addr ) ) {
-      if (socket_addr.port != 0) {
+      if( fd_gossip_port_from_socketaddr( &socket_addr ) != 0) {
         /* Remember the peer */
         fd_gossip_peer_addr_t pkey;
         fd_memset(&pkey, 0, sizeof(pkey));
@@ -1296,8 +1349,9 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
         }
       }
 
-      fd_gossip_peer_addr_t peer_addr = { .addr = socket_addr.addr.inner.ip4,
-                                          .port = fd_ushort_bswap( socket_addr.port ) };
+      fd_gossip_peer_addr_t peer_addr = { .addr = socket_addr.inner.ip4.addr,
+                                          /* FIXME: hardcode to ip4 inner? */
+                                          .port = fd_ushort_bswap( fd_gossip_port_from_socketaddr( &socket_addr ) ) };
       if (glob->my_contact_info.shred_version == 0U && fd_gossip_is_allowed_entrypoint( glob, &peer_addr )) {
         FD_LOG_NOTICE(("using shred version %lu", (ulong)crd->data.inner.contact_info_v2.shred_version));
         glob->my_contact_info.shred_version = crd->data.inner.contact_info_v2.shred_version;
@@ -1311,6 +1365,60 @@ fd_gossip_recv_crds_value(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from
   fd_gossip_lock( glob );
 }
 
+static int
+verify_signable_data_with_prefix( fd_gossip_prune_msg_t * msg ) {
+  fd_gossip_prune_sign_data_with_prefix_t signdata[1] = {0};
+  signdata->prefix           = (uchar *)&FD_GOSSIP_PRUNE_DATA_PREFIX;
+  signdata->prefix_len       = 18UL;
+  signdata->data.pubkey      = msg->data.pubkey;
+  signdata->data.prunes_len  = msg->data.prunes_len;
+  signdata->data.prunes      = msg->data.prunes;
+  signdata->data.destination = msg->data.destination;
+  signdata->data.wallclock   = msg->data.wallclock;
+
+  uchar buf[PACKET_DATA_SIZE];
+  fd_bincode_encode_ctx_t ctx;
+  ctx.data    = buf;
+  ctx.dataend = buf + PACKET_DATA_SIZE;
+  if ( fd_gossip_prune_sign_data_with_prefix_encode( signdata, &ctx ) ) {
+    FD_LOG_WARNING(("fd_gossip_prune_sign_data_encode failed"));
+    return 1;
+  }
+
+  fd_sha512_t sha[1];
+  return fd_ed25519_verify( /* msg */ buf,
+                         /* sz  */ (ulong)((uchar*)ctx.data - buf),
+                         /* sig */ msg->data.signature.uc,
+                         /* public_key */ msg->data.pubkey.uc,
+                         sha );
+}
+
+static int
+verify_signable_data( fd_gossip_prune_msg_t * msg ) {
+  fd_gossip_prune_sign_data_t signdata;
+  signdata.pubkey      = msg->data.pubkey;
+  signdata.prunes_len  = msg->data.prunes_len;
+  signdata.prunes      = msg->data.prunes;
+  signdata.destination = msg->data.destination;
+  signdata.wallclock   = msg->data.wallclock;
+
+  uchar buf[PACKET_DATA_SIZE];
+  fd_bincode_encode_ctx_t ctx;
+  ctx.data    = buf;
+  ctx.dataend = buf + PACKET_DATA_SIZE;
+  if ( fd_gossip_prune_sign_data_encode( &signdata, &ctx ) ) {
+    FD_LOG_WARNING(("fd_gossip_prune_sign_data_encode failed"));
+    return 1;
+  }
+
+  fd_sha512_t sha[1];
+  return fd_ed25519_verify( /* msg */ buf,
+                         /* sz  */ (ulong)((uchar*)ctx.data - buf),
+                         /* sig */ msg->data.signature.uc,
+                         /* public_key */ msg->data.pubkey.uc,
+                         sha );
+}
+
 /* Handle a prune request from somebody else */
 static void
 fd_gossip_handle_prune(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from, fd_gossip_prune_msg_t * msg) {
@@ -1320,33 +1428,10 @@ fd_gossip_handle_prune(fd_gossip_t * glob, const fd_gossip_peer_addr_t * from, f
   if (memcmp(msg->data.destination.uc, glob->public_key->uc, 32U) != 0)
     return;
 
-  /* Verify the signature. This is hacky for prune messages */
-  fd_gossip_prune_sign_data_t signdata;
-  signdata.pubkey = msg->data.pubkey;
-  signdata.prunes_len = msg->data.prunes_len;
-  signdata.prunes = msg->data.prunes;
-  signdata.destination = msg->data.destination;
-  signdata.wallclock = msg->data.wallclock;
-
-  /* Verify the signature. You would think that solana would use
-     msg->pubkey.uc for this, but that pubkey is actually ignored. The
-     inclusion of two pubkeys in this message is confusing and
-     problematic. */
-  uchar buf[PACKET_DATA_SIZE];
-  fd_bincode_encode_ctx_t ctx;
-  ctx.data = buf;
-  ctx.dataend = buf + PACKET_DATA_SIZE;
-  if ( fd_gossip_prune_sign_data_encode( &signdata, &ctx ) ) {
-    FD_LOG_ERR(("fd_gossip_prune_sign_data_encode failed"));
-    return;
-  }
-  fd_sha512_t sha[1];
-  if (fd_ed25519_verify( /* msg */ buf,
-                         /* sz  */ (ulong)((uchar*)ctx.data - buf),
-                         /* sig */ msg->data.signature.uc,
-                         /* public_key */ msg->data.pubkey.uc,
-                         sha )) {
-    FD_LOG_WARNING(("received prune_msg with invalid signature"));
+  /* Try to verify the signed data either with the prefix and not the prefix */
+  if ( ! (  verify_signable_data( msg ) == FD_ED25519_SUCCESS ||
+            verify_signable_data_with_prefix( msg ) == FD_ED25519_SUCCESS ) ) {
+    FD_LOG_WARNING(( "received prune message with invalid signature" ));
     return;
   }
 
@@ -1436,51 +1521,53 @@ fd_gossip_push_updated_contact(fd_gossip_t * glob) {
     ushort last_port = 0;
     uchar cnt = 0;
     for(;;) {
-      fd_gossip_ip_addr_t * min_addr = NULL;
+      fd_gossip_socket_addr_t* min_socket = NULL;
+      fd_gossip_ip_addr_t min_addr[1] = {0};
       ushort min_port = USHORT_MAX;
       uchar min_key = 0;
 
-      ushort gossip_port = glob->my_contact_info.gossip.port;
-      ushort serve_repair_port = glob->my_contact_info.serve_repair.port;
-      ushort tvu_port = glob->my_contact_info.tvu.port;
-      ushort tpu_port = glob->my_contact_info.tpu.port;
-      ushort tpu_quic_port = (ushort)( glob->my_contact_info.tpu.port + 6 );
-      ushort tpu_vote_port = glob->my_contact_info.tpu_vote.port;
+      ushort gossip_port = fd_gossip_port_from_socketaddr( &glob->my_contact_info.gossip );
+      ushort serve_repair_port = fd_gossip_port_from_socketaddr( &glob->my_contact_info.serve_repair );
+      ushort tvu_port = fd_gossip_port_from_socketaddr( &glob->my_contact_info.tvu );
+      ushort tpu_port = fd_gossip_port_from_socketaddr( &glob->my_contact_info.tpu );
+      ushort tpu_quic_port = (ushort)(fd_gossip_port_from_socketaddr( &glob->my_contact_info.tpu ) + 6);
+      ushort tpu_vote_port = fd_gossip_port_from_socketaddr( &glob->my_contact_info.tpu_vote );
       if( gossip_port > 0 && gossip_port > last_port && gossip_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_GOSSIP;
-        min_addr = &glob->my_contact_info.gossip.addr;
-        min_port = glob->my_contact_info.gossip.port;
+        min_socket = &glob->my_contact_info.gossip;
+        min_port = gossip_port;
       }
       if( serve_repair_port > 0 && serve_repair_port > last_port && serve_repair_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_SERVE_REPAIR;
-        min_addr = &glob->my_contact_info.serve_repair.addr;
-        min_port = glob->my_contact_info.serve_repair.port;
+        min_socket = &glob->my_contact_info.serve_repair;
+        min_port = serve_repair_port;
       }
       if( tvu_port > 0 && tvu_port > last_port && tvu_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_TVU;
-        min_addr = &glob->my_contact_info.tvu.addr;
-        min_port = glob->my_contact_info.tvu.port;
+        min_socket = &glob->my_contact_info.tvu;
+        min_port = tvu_port;
       }
       if( tpu_port > 0 && tpu_port > last_port && tpu_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_TPU;
-        min_addr = &glob->my_contact_info.tpu.addr;
-        min_port = glob->my_contact_info.tpu.port;
+        min_socket = &glob->my_contact_info.tpu;
+        min_port = tpu_port;
       }
       if( tpu_quic_port > 0 && tpu_quic_port > last_port && tpu_quic_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_TPU_QUIC;
-        min_addr = &glob->my_contact_info.tpu.addr;
-        min_port = (ushort)( glob->my_contact_info.tpu.port + 6 );
+        min_socket = &glob->my_contact_info.tpu;
+        min_port = tpu_quic_port;
       }
       if( tpu_vote_port > 0 && tpu_vote_port > last_port && tpu_vote_port < min_port ) {
         min_key = FD_GOSSIP_SOCKET_TAG_TPU_VOTE;
-        min_addr = &glob->my_contact_info.tpu_vote.addr;
-        min_port = glob->my_contact_info.tpu_vote.port;
+        min_socket = &glob->my_contact_info.tpu_vote;
+        min_port = tpu_vote_port;
       }
       if( min_port==USHORT_MAX ) {
         break;
       }
 
-      ci->addrs[ cnt ] = *min_addr;
+      /* ci->addrs[ cnt ] = min_socket->inner.{ip4,ip6}.addr */
+      fd_gossip_ipaddr_from_socketaddr( min_socket, &ci->addrs[ cnt ] );
       ci->sockets[ cnt ].index = 0;
       ci->sockets[ cnt ].offset = (ushort)( min_port - last_port );
       ci->sockets[ cnt ].key = min_key;
@@ -1747,15 +1834,15 @@ fd_gossip_refresh_push_states( fd_gossip_t * glob, fd_pending_event_arg_t * arg 
       s->prune_keys[j] = fd_rng_ulong(glob->rng);
 
     /* Encode an empty push msg template */
-    fd_gossip_msg_t gmsg;
-    fd_gossip_msg_new_disc(&gmsg, fd_gossip_msg_enum_push_msg);
-    fd_gossip_push_msg_t * push_msg = &gmsg.inner.push_msg;
+    fd_gossip_msg_t gmsg[1] = {0};
+    fd_gossip_msg_new_disc(gmsg, fd_gossip_msg_enum_push_msg);
+    fd_gossip_push_msg_t * push_msg = &gmsg->inner.push_msg;
     fd_hash_copy( &push_msg->pubkey, glob->public_key );
     fd_bincode_encode_ctx_t ctx;
     ctx.data = s->packet;
     ctx.dataend = s->packet + PACKET_DATA_SIZE;
-    if ( fd_gossip_msg_encode( &gmsg, &ctx ) ) {
-      FD_LOG_WARNING(("fd_gossip_msg_encode failed"));
+    if ( fd_gossip_msg_encode( gmsg, &ctx ) ) {
+      FD_LOG_ERR(("fd_gossip_msg_encode failed"));
       return;
     }
     s->packet_end_init = s->packet_end = (uchar *)ctx.data;
