@@ -28,6 +28,7 @@
 #include "../../flamenco/shredcap/fd_shredcap.h"
 #include "../../flamenco/runtime/program/fd_bpf_program_util.h"
 #include "../../flamenco/snapshot/fd_snapshot.h"
+#include "../../util/fd_rmq.h"
 
 extern void fd_write_builtin_bogus_account( fd_exec_slot_ctx_t * slot_ctx, uchar const pubkey[ static 32 ], char const * data, ulong sz );
 
@@ -105,6 +106,14 @@ struct fd_ledger_args {
   ulong                 spad_cnt;                /* number of scratchpads, bounded by number of threads */
 
   char const *      lthash;
+
+  // RabbitMQ configuration
+  int         rmq_enabled;
+  char const* rmq_host;
+  int         rmq_port;
+  char const* rmq_user;
+  char const* rmq_pass;
+  fd_rmq_t*   rmq;
 };
 typedef struct fd_ledger_args fd_ledger_args_t;
 
@@ -135,6 +144,41 @@ init_tpool( fd_ledger_args_t * ledger_args ) {
   }
   ledger_args->tpool = tpool;
   return 0;
+}
+
+// Publishing Transaction Data for RabbitMQ
+static void 
+publish_transaction_data(fd_rmq_t* rmq, fd_block_t* blk, ulong slot) {
+  if (!rmq) return;
+  
+  // Create JSON-formatted message
+  char message[1024];
+  snprintf(message, sizeof(message),
+           "{\"slot\":%lu,\"block_hash\":\"%.*s\",\"txn_count\":%lu}",
+           slot,
+           32, blk->hash,
+           blk->txn_cnt);
+           
+  fd_rmq_publish(rmq, "firedancer", "transactions", message);
+}
+
+// Publishing Account State for RabbitMQ
+static void 
+publish_account_state(fd_rmq_t* rmq, const fd_funk_rec_t* rec, ulong slot) {
+  if (!rmq) return;
+
+  char pubkey[FD_BASE58_ENCODED_32_SZ];
+  fd_acct_addr_cstr(pubkey, (uchar*)&rec->pair.key);
+  
+  // Create JSON-formatted message
+  char message[2048];
+  snprintf(message, sizeof(message),
+           "{\"slot\":%lu,\"pubkey\":\"%s\",\"lamports\":%lu}",
+           slot,
+           pubkey,
+           rec->lamports);
+           
+  fd_rmq_publish(rmq, "firedancer", "account_states", message);
 }
 
 int
@@ -183,6 +227,18 @@ runtime_replay( fd_ledger_args_t * ledger_args ) {
   /* Setup trash_hash */
   uchar trash_hash_buf[32];
   memset( trash_hash_buf, 0xFE, sizeof(trash_hash_buf) );
+
+  // Initialize RabbitMQ if enabled
+  if (ledger_args->rmq_enabled) {
+    ledger_args->rmq = fd_rmq_init(ledger_args->rmq_host, 
+                                  ledger_args->rmq_port,
+                                  ledger_args->rmq_user, 
+                                  ledger_args->rmq_pass);
+    if (!ledger_args->rmq) {
+      FD_LOG_WARNING(("Failed to initialize RabbitMQ - continuing without streaming"));
+      ledger_args->rmq_enabled = 0;
+    }
+  }
 
   for( ulong slot = start_slot; slot <= ledger_args->end_slot; ++slot ) {
     ledger_args->slot_ctx->slot_bank.prev_slot = prev_slot;
@@ -318,6 +374,23 @@ runtime_replay( fd_ledger_args_t * ledger_args ) {
         }
       }
     }
+
+    if (ledger_args->rmq_enabled && ledger_args->rmq) {
+      // Publish transaction data
+      publish_transaction_data(ledger_args->rmq, blk, slot);
+      
+      // Publish account states
+      fd_funk_start_write(ledger_args->slot_ctx->acc_mgr->funk);
+      fd_funk_rec_t* rec_map = fd_funk_rec_map(ledger_args->slot_ctx->acc_mgr->funk,
+                                              fd_funk_wksp(ledger_args->slot_ctx->acc_mgr->funk));
+      
+      for (const fd_funk_rec_t* rec = fd_funk_txn_rec_head(ledger_args->slot_ctx->funk_txn, rec_map);
+           rec;
+           rec = fd_funk_txn_next_rec(ledger_args->slot_ctx->acc_mgr->funk, rec)) {
+        publish_account_state(ledger_args->rmq, rec, slot);
+      }
+      fd_funk_end_write(ledger_args->slot_ctx->acc_mgr->funk);
+    }
   }
 
   if( ledger_args->tpool ) {
@@ -343,6 +416,12 @@ runtime_replay( fd_ledger_args_t * ledger_args ) {
 
   if ( slot_cnt == 0 ) {
     FD_LOG_ERR(( "No slots replayed" ));
+  }
+
+  // Cleanup RabbitMQ
+  if (ledger_args->rmq) {
+    fd_rmq_cleanup(ledger_args->rmq);
+    ledger_args->rmq = NULL;
   }
 
   return 0;
@@ -855,7 +934,7 @@ ingest( fd_ledger_args_t * args ) {
   /* Load in snapshot(s) */
   if( args->snapshot ) {
     fd_snapshot_load( args->snapshot, slot_ctx, args->tpool, args->verify_acc_hash, args->check_acc_hash , FD_SNAPSHOT_TYPE_FULL );
-    FD_LOG_NOTICE(( "imported %lu records from snapshot", fd_funk_rec_cnt( fd_funk_rec_map( funk, fd_funk_wksp( funk ) ) ) ));
+    FD_LOG_NOTICE(( "imported %lu records from snapshot", fd_funk_rec_cnt( fd_funk_rec_map( funk, fd_funk_wksp( funk ) ) ) ) ));
   }
   if( args->incremental ) {
     fd_snapshot_load( args->incremental, slot_ctx, args->tpool, args->verify_acc_hash, args->check_acc_hash, FD_SNAPSHOT_TYPE_INCREMENTAL );
@@ -1449,6 +1528,17 @@ initial_setup( int argc, char ** argv, fd_ledger_args_t * args ) {
   args->rocksdb_list_cnt        = 0UL;
   args->checkpt_status_cache    = checkpt_status_cache;
   args->one_off_features_cnt    = 0UL;
+  args->rmq_enabled = fd_env_strip_cmdline_int(&argc, &argv, 
+      "--rmq-enabled", NULL, 0);
+  args->rmq_host = fd_env_strip_cmdline_cstr(&argc, &argv, 
+      "--rmq-host", NULL, "localhost");
+  args->rmq_port = fd_env_strip_cmdline_int(&argc, &argv, 
+      "--rmq-port", NULL, 5672);
+  args->rmq_user = fd_env_strip_cmdline_cstr(&argc, &argv, 
+      "--rmq-user", NULL, "guest");
+  args->rmq_pass = fd_env_strip_cmdline_cstr(&argc, &argv, 
+      "--rmq-pass", NULL, "guest");
+  args->rmq = NULL;
   parse_one_off_features( args, one_off_features );
   parse_rocksdb_list( args, rocksdb_list, rocksdb_list_starts );
 
