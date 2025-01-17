@@ -146,18 +146,41 @@ init_tpool( fd_ledger_args_t * ledger_args ) {
 
 // Publishing Transaction Data for RabbitMQ
 static void 
-publish_transaction_data(fd_rmq_t* rmq, fd_block_t* blk, ulong slot) {
+publish_transaction_data(fd_rmq_t* rmq, fd_block_t* blk, ulong slot, fd_blockstore_t* blockstore) {
   if (!rmq) return;
+
+  // Need to get the block map entry to access the hash
+  fd_block_map_t* block_map = fd_blockstore_block_map_query(blockstore, slot);
+  if (!block_map) return;
+
+  // Start blockstore read to access transaction data
+  fd_blockstore_start_read(blockstore);
+
+  // Get block data and transactions
+  uchar* block_data = fd_blockstore_block_data_laddr(blockstore, blk);
+  fd_block_txn_t* txns = fd_wksp_laddr_fast(fd_blockstore_wksp(blockstore), blk->txns_gaddr);
+    
+  // Iterate through transactions
+  for (ulong i = 0; i < blk->txns_cnt; i++) {
+      fd_block_txn_t* txn = &txns[i];
+      
+      // Get raw transaction data
+      uchar* txn_data = block_data + txn->txn_off;
+      
+      // Convert transaction data to base58 string
+      char txn_data_str[FD_BASE58_ENCODED_64_SZ];
+      fd_base58_encode_64(txn_data_str, txn_data, txn->sz);
+
+       // Create simple JSON message with just the transaction data
+      char message[FD_BASE58_ENCODED_64_SZ + 32]; // Extra space for JSON formatting
+      snprintf(message, sizeof(message),
+              "{\"txn_data\":\"%s\"}", 
+              txn_data_str);
+              
+      fd_rmq_publish(rmq, "firedancer", "transactions", message);
+  }
   
-  // Create JSON-formatted message
-  char message[1024];
-  snprintf(message, sizeof(message),
-           "{\"slot\":%lu,\"block_hash\":\"%.*s\",\"txn_count\":%lu}",
-           slot,
-           32, blk->hash,
-           blk->txn_cnt);
-           
-  fd_rmq_publish(rmq, "firedancer", "transactions", message);
+  fd_blockstore_end_read(blockstore);
 }
 
 // Publishing Account State for RabbitMQ
@@ -165,16 +188,52 @@ static void
 publish_account_state(fd_rmq_t* rmq, const fd_funk_rec_t* rec, ulong slot) {
   if (!rmq) return;
 
+  // Validate we have value data
+  if (!rec->val_gaddr || !rec->val_sz) return;
+
+  // Convert public key to string format
   char pubkey[FD_BASE58_ENCODED_32_SZ];
   fd_acct_addr_cstr(pubkey, (uchar*)&rec->pair.key);
+
+  // Access account metadata where lamports is stored
+  fd_account_meta_t* meta = (fd_account_meta_t*)fd_wksp_gaddr2ptr(rec->val_gaddr);
+  if (!meta) return;
+
+  // Convert owner to string format
+  char owner[FD_BASE58_ENCODED_32_SZ];
+  fd_base58_encode_32(owner, meta->info.owner, sizeof(fd_pubkey_t));
+
+  // Get account data and encode it to base58
+  uchar* data = ((uchar*)meta) + meta->hlen;
+  ulong data_len = meta->dlen;
+  char data_str[FD_BASE58_ENCODED_64_SZ];
+  if (data_len > 0) {
+      fd_base58_encode_64(data_str, data, data_len);
+  } else {
+      data_str[0] = '\0';  // Empty string for no data
+  }
   
-  // Create JSON-formatted message
-  char message[2048];
+  // Create JSON-formatted message with all account state data
+  char message[8192];  // Increased buffer size to accommodate data
   snprintf(message, sizeof(message),
-           "{\"slot\":%lu,\"pubkey\":\"%s\",\"lamports\":%lu}",
-           slot,
-           pubkey,
-           rec->lamports);
+            "{"
+            "\"slot\":%lu,"
+            "\"pubkey\":\"%s\","
+            "\"lamports\":%lu,"
+            "\"owner\":\"%s\","
+            "\"executable\":%s,"
+            "\"rent_epoch\":%lu,"
+            "\"data_len\":%lu,"
+            "\"data\":\"%s\""
+            "}",
+            slot,
+            pubkey,
+            fd_account_get_lamports(meta),
+            owner,
+            fd_account_is_executable(meta) ? "true" : "false",
+            fd_account_get_rent_epoch(meta),
+            data_len,
+            data_str);
            
   fd_rmq_publish(rmq, "firedancer", "account_states", message);
 }
@@ -409,7 +468,7 @@ runtime_replay( fd_ledger_args_t * ledger_args ) {
 
     if (ledger_args->rmq_enabled && ledger_args->rmq) {
       // Publish transaction data
-      publish_transaction_data(ledger_args->rmq, blk, slot);
+      publish_transaction_data(ledger_args->rmq, blk, slot, ledger_args->blockstore);
       
       // Publish account states
       fd_funk_start_write(ledger_args->slot_ctx->acc_mgr->funk);
